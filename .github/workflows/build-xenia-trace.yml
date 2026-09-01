@@ -1,4 +1,4 @@
-name: Build Xenia Canary Syndicate Magenta Test 3
+name: Build Xenia Canary Syndicate Magenta Test 4
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Release Windows x86-64 with Additive Effect Pair A Test
+    name: Release Windows x86-64 with Additive Effect Pair B Test
     runs-on: windows-2025
     timeout-minutes: 90
 
@@ -55,7 +55,7 @@ jobs:
           }
           Write-Host $defines.Line
 
-      - name: Apply Syndicate close-range additive effect pair A test
+      - name: Apply Syndicate close-range additive effect pair B test
         shell: pwsh
         run: |
           $path = "src/xenia/gpu/d3d12/d3d12_command_processor.cc"
@@ -63,20 +63,20 @@ jobs:
           $needle = '  ID3D12Device* device = GetD3D12Provider().GetDevice();'
           $needlePattern = '(?m)^  ID3D12Device\* device = GetD3D12Provider\(\)\.GetDevice\(\);\r?$'
           $injection = @'
-            // Syndicate (45410923) diagnostic. This exact VS/PS pair is a real
-            // additive color draw present only in the close/magenta trace.
+            // Syndicate (45410923) diagnostic. This is the remaining real
+            // additive color pair present only in the close/magenta trace.
             if (active_vertex_shader() != nullptr &&
                 active_pixel_shader() != nullptr &&
-                active_vertex_shader()->ucode_data_hash() == 0xB62F850122CDB3C7ull &&
-                active_pixel_shader()->ucode_data_hash() == 0x0E70FECB9DE85523ull) {
+                active_vertex_shader()->ucode_data_hash() == 0x65DA3C4F1690A708ull &&
+                active_pixel_shader()->ucode_data_hash() == 0xD5D331F376D5EC87ull) {
               return true;
             }
 
           '@
 
-          if ($content.Contains('0xB62F850122CDB3C7ull') -or
-              $content.Contains('0x0E70FECB9DE85523ull')) {
-            throw "The Syndicate additive effect pair A test is already present."
+          if ($content.Contains('0x65DA3C4F1690A708ull') -or
+              $content.Contains('0xD5D331F376D5EC87ull')) {
+            throw "The Syndicate additive effect pair B test is already present."
           }
           if (!$content.Contains($needle)) {
             throw "IssueDraw insertion point was not found."
@@ -90,12 +90,12 @@ jobs:
           )
           [System.IO.File]::WriteAllText((Resolve-Path $path), $modified, [System.Text.UTF8Encoding]::new($false))
 
-          $vsCheck = Select-String -Path $path -Pattern 'B62F850122CDB3C7'
-          $psCheck = Select-String -Path $path -Pattern '0E70FECB9DE85523'
+          $vsCheck = Select-String -Path $path -Pattern '65DA3C4F1690A708'
+          $psCheck = Select-String -Path $path -Pattern 'D5D331F376D5EC87'
           if ($vsCheck.Count -ne 1 -or $psCheck.Count -ne 1) {
-            throw "The Syndicate additive effect pair A test was not inserted exactly once."
+            throw "The Syndicate additive effect pair B test was not inserted exactly once."
           }
-          Write-Host "Syndicate diagnostic additive effect pair A suppression inserted."
+          Write-Host "Syndicate diagnostic additive effect pair B suppression inserted."
 
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk
@@ -161,7 +161,7 @@ jobs:
       - name: Upload executable artifact
         uses: actions/upload-artifact@v7
         with:
-          name: xenia-canary-syndicate-magenta-test3-3a44f20c7
+          name: xenia-canary-syndicate-magenta-test4-3a44f20c7
           path: artifact/*
           if-no-files-found: error
           retention-days: 7
