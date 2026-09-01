@@ -1,0 +1,126 @@
+name: Build Xenia Canary Trace Frame
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release Windows x86-64 with Trace Writer
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+      XENIA_COMMIT: 3a44f20c7bc66db1da583e8a6f0ab740e31908e9
+
+    steps:
+      - name: Checkout exact Xenia Canary revision
+        uses: actions/checkout@v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: 3a44f20c7bc66db1da583e8a6f0ab740e31908e9
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify exact revision
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:XENIA_COMMIT) {
+            throw "Wrong Xenia revision: $actual"
+          }
+          Write-Host "Building Xenia Canary commit $actual"
+
+      - name: Enable Trace Writer instrumentation in Release
+        shell: pwsh
+        run: |
+          $path = "src/xenia/gpu/trace_writer.h"
+          $content = Get-Content $path -Raw
+          $pattern = '(?ms)#ifdef NDEBUG\r?\n#define XE_ENABLE_TRACE_WRITER_INSTRUMENTATION 0\r?\n#else\r?\n#define XE_ENABLE_TRACE_WRITER_INSTRUMENTATION 1\r?\n#endif'
+          $replacement = '#define XE_ENABLE_TRACE_WRITER_INSTRUMENTATION 1'
+          $modified = [regex]::Replace($content, $pattern, $replacement, 1)
+          if ($modified -eq $content) {
+            throw "Expected Trace Writer conditional block was not found."
+          }
+          [System.IO.File]::WriteAllText((Resolve-Path $path), $modified, [System.Text.UTF8Encoding]::new($false))
+
+          $defines = Select-String -Path $path -Pattern '^#define XE_ENABLE_TRACE_WRITER_INSTRUMENTATION .+$'
+          if ($defines.Count -ne 1 -or $defines.Line.Trim() -ne '#define XE_ENABLE_TRACE_WRITER_INSTRUMENTATION 1') {
+            throw "Trace Writer instrumentation was not forced to 1."
+          }
+          Write-Host $defines.Line
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-${{ hashFiles('**/vulkan-sdk.exe') }}
+          restore-keys: ${{ runner.os }}-vulkan-sdk-
+
+      - name: Install Vulkan SDK with SPIR-V tools
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\VulkanSDK") {
+            Write-Host "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+          }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$(Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name)"
+          $env:PATH += ";${env:VULKAN_SDK}\Bin"
+          "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "${env:VULKAN_SDK}\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+          foreach ($tool in @("glslangValidator", "spirv-opt", "spirv-dis")) {
+            $toolPath = "${env:VULKAN_SDK}\Bin\${tool}.exe"
+            if (Test-Path $toolPath) {
+              Write-Host "$tool found at $toolPath"
+              & $toolPath --version 2>$null
+            } else {
+              Write-Warning "${tool}.exe not found at expected location"
+            }
+          }
+
+      - name: Download required submodules
+        shell: pwsh
+        run: |
+          $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
+
+      - name: Build Xenia Release
+        shell: pwsh
+        run: python xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Verify executable and calculate SHA-256
+        id: package
+        shell: pwsh
+        run: |
+          $exe = "build\bin\Windows\Release\xenia_canary.exe"
+          if (!(Test-Path $exe)) {
+            throw "xenia_canary.exe was not produced."
+          }
+          if ((Get-Item $exe).Length -le 100000) {
+            throw "xenia_canary.exe is unexpectedly small."
+          }
+
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item $exe "artifact\xenia_canary.exe"
+          $hash = (Get-FileHash "artifact\xenia_canary.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenia_canary.exe" | Set-Content "artifact\SHA256.txt" -Encoding ascii
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-trace-frame-3a44f20c7
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
