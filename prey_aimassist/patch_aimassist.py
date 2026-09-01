@@ -95,7 +95,7 @@ if needle not in text:
     raise SystemExit("Could not locate DetermineAimAxis aimVector line")
 
 inject = r'''
-	// Xbox 360 projectile magnetism.  This is intentionally inserted at the
+	// Xbox 360 projectile magnetism. This is intentionally inserted at the
 	// same stage as the console routine: after the eye trace/portal handling,
 	// but before the final aim vector is built and blended toward weaponAxis.
 	if ( ui_aimAssist.GetBool() && !gameLocal.isMultiplayer ) {
@@ -108,7 +108,7 @@ inject = r'''
 			aimTrace.endpos = assistTarget->GetAimPosition();
 			aimTraceDist = ( aimTrace.endpos - muzzlePos ).Length();
 			if ( AA_Debug.GetBool() ) {
-				gameLocal.Printf( "[360 AimAssist] target='%s' dist=%.2f dot=%.5f width=%.2f\\n",
+				gameLocal.Printf( "[360 AimAssist] target='%s' dist=%.2f dot=%.5f width=%.2f\n",
 					assistTarget->GetName(), assistDistance, assistDot, assistWidth );
 			}
 		}
@@ -120,4 +120,24 @@ if "[360 AimAssist]" not in text:
     text = text.replace(needle, inject + needle, 1)
 
 src.write_text(text, encoding="latin-1")
-print("Patched:", src)
+print("Aim-assist patched:", src)
+
+# -----------------------------------------------------------------------------
+# Compatibility fixes for the untouched 2006 SDK when compiled by MSVC 2022.
+# These do not alter gameplay; they only resolve syntax/name issues tolerated
+# by the original Visual C++ 2005 toolchain.
+# -----------------------------------------------------------------------------
+interp = Path("prey-sdk/src/idLib/math/Interpolate.h")
+interp_text = interp.read_text(encoding="latin-1")
+old_midpoint = "return idMath::Sin( DEG2RAD(idMath::MidPointLerp(0.0f, 60.0f, 90.0f, frac)) );"
+new_midpoint = "return idMath::Sin( DEG2RAD( ( frac <= 0.0f ) ? 0.0f : ( ( frac >= 1.0f ) ? 90.0f : ( ( frac < 0.5f ) ? ( 120.0f * frac ) : ( 60.0f + 60.0f * ( frac - 0.5f ) ) ) ) ) );"
+if old_midpoint in interp_text:
+    interp_text = interp_text.replace(old_midpoint, new_midpoint, 1)
+interp.write_text(interp_text, encoding="latin-1")
+print("MSVC compatibility patched:", interp)
+
+simd = Path("prey-sdk/src/idLib/math/Simd.cpp")
+simd_text = simd.read_text(encoding="latin-1")
+simd_text = simd_text.replace('S_COLOR_RED"X"', 'S_COLOR_RED "X"')
+simd.write_text(simd_text, encoding="latin-1")
+print("MSVC compatibility patched:", simd)
