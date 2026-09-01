@@ -1,4 +1,4 @@
-name: Build Xenia Canary Trace Frame
+name: Build Xenia Canary Syndicate Magenta Test
 
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    name: Release Windows x86-64 with Trace Writer
+    name: Release Windows x86-64 with Syndicate Shader Test
     runs-on: windows-2025
     timeout-minutes: 90
 
@@ -54,6 +54,38 @@ jobs:
             throw "Trace Writer instrumentation was not forced to 1."
           }
           Write-Host $defines.Line
+
+      - name: Apply Syndicate close-range magenta shader test
+        shell: pwsh
+        run: |
+          $path = "src/xenia/gpu/d3d12/d3d12_command_processor.cc"
+          $content = Get-Content $path -Raw
+          $needle = '  ID3D12Device* device = GetD3D12Provider().GetDevice();'
+          $injection = @'
+            // Syndicate (45410923) diagnostic. This shader appears in three consecutive
+            // close-range draws in the magenta trace and is absent from the clean trace.
+            if (active_pixel_shader() != nullptr &&
+                active_pixel_shader()->ucode_data_hash() == 0x03E12BF8A5730E26ull) {
+              return true;
+            }
+
+          '@
+
+          if ($content.Contains('0x03E12BF8A5730E26ull')) {
+            throw "The Syndicate shader test is already present."
+          }
+          if (!$content.Contains($needle)) {
+            throw "IssueDraw insertion point was not found."
+          }
+
+          $modified = $content.Replace($needle, $injection + [Environment]::NewLine + $needle)
+          [System.IO.File]::WriteAllText((Resolve-Path $path), $modified, [System.Text.UTF8Encoding]::new($false))
+
+          $check = Select-String -Path $path -Pattern '03E12BF8A5730E26'
+          if ($check.Count -ne 1) {
+            throw "The Syndicate shader test was not inserted exactly once."
+          }
+          Write-Host "Syndicate diagnostic shader suppression inserted."
 
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk
@@ -119,7 +151,7 @@ jobs:
       - name: Upload executable artifact
         uses: actions/upload-artifact@v7
         with:
-          name: xenia-canary-trace-frame-3a44f20c7
+          name: xenia-canary-syndicate-magenta-test-3a44f20c7
           path: artifact/*
           if-no-files-found: error
           retention-days: 7
