@@ -1,0 +1,99 @@
+name: Build Prey 2006 Xbox 360 Aim Assist
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-prey-aimassist.yml'
+      - 'prey_aimassist/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Checkout PREY 2006 SDK game sources
+        uses: actions/checkout@v4
+        with:
+          repository: themuffinator/openPREY-game
+          ref: d224b083d70dddae1b8ba00081b4d72dedd8bc03
+          path: prey-sdk
+
+      - name: Apply Xbox 360 aim-assist diagnostic port
+        shell: pwsh
+        run: |
+          python prey_aimassist/patch_aimassist.py
+          Select-String -Path prey-sdk/src/Prey/prey_weaponfirecontroller.cpp -Pattern 'ui_aimAssist|AA_MinDist|HH_FindXbox360AimAssistTarget|360 AimAssist'
+
+      - name: Generate modern Win32 build files from original VS2005 projects
+        shell: pwsh
+        run: |
+          python prey_aimassist/gen_cmake.py
+
+      - name: Configure Win32 Release
+        shell: pwsh
+        run: |
+          cmake -S prey-sdk/src -B prey-build -A Win32
+
+      - name: Build retail-compatible gamex86.dll
+        shell: pwsh
+        run: |
+          cmake --build prey-build --config Release --target gamex86 -- /m
+
+      - name: Inspect and package diagnostic DLL
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path prey-build -Filter gamex86.dll -Recurse | Select-Object -First 1
+          if (-not $dll) { throw 'gamex86.dll was not produced' }
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item $dll.FullName artifact/gamex86.dll
+          $hash = (Get-FileHash artifact/gamex86.dll -Algorithm SHA256).Hash.ToLower()
+          "SHA-256  gamex86.dll`r`n$hash" | Set-Content artifact/SHA256.txt
+          @"
+          PREY 2006 - Xbox 360 Aim Assist - DIAGNOSTIC BUILD
+
+          Target: retail PREY.exe 1.4 (Win32)
+          Game DLL: gamex86.dll
+
+          Reconstructed Xbox 360 defaults:
+            ui_aimAssist = 1
+            AA_MinDist   = 90
+            AA_MaxDist   = 680
+            AA_MinDot    = 0.98
+            AA_Width     = 75
+
+          Diagnostic logging is enabled by default:
+            AA_Debug = 1
+
+          When a shot receives aim assistance the console prints:
+            [360 AimAssist] target='...' dist=... dot=... width=...
+
+          Keep a backup of the original game DLL/PK4 before testing.
+          This is a first diagnostic build intended to verify loading and target selection.
+          "@ | Set-Content artifact/README_TEST.txt
+
+          "DLL: $($dll.FullName)"
+          "SHA256: $hash"
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Filter dumpbin.exe -Recurse | Where-Object { $_.FullName -match '\\Hostx64\\x86\\dumpbin.exe$' } | Select-Object -First 1
+          if ($dumpbin) {
+            & $dumpbin.FullName /headers artifact/gamex86.dll | Out-File artifact/PE_HEADERS.txt
+            & $dumpbin.FullName /exports artifact/gamex86.dll | Out-File artifact/EXPORTS.txt
+          }
+
+      - name: Upload diagnostic build
+        uses: actions/upload-artifact@v4
+        with:
+          name: prey-360-aimassist-diagnostic
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 14
