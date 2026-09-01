@@ -61,6 +61,7 @@ jobs:
           $path = "src/xenia/gpu/d3d12/d3d12_command_processor.cc"
           $content = Get-Content $path -Raw
           $needle = '  ID3D12Device* device = GetD3D12Provider().GetDevice();'
+          $needlePattern = '(?m)^  ID3D12Device\* device = GetD3D12Provider\(\)\.GetDevice\(\);\r?$'
           $injection = @'
             // Syndicate (45410923) diagnostic. This shader appears in three consecutive
             // close-range draws in the magenta trace and is absent from the clean trace.
@@ -78,7 +79,12 @@ jobs:
             throw "IssueDraw insertion point was not found."
           }
 
-          $modified = $content.Replace($needle, $injection + [Environment]::NewLine + $needle)
+          $needleRegex = [regex]::new($needlePattern)
+          $modified = $needleRegex.Replace(
+            $content,
+            $injection + [Environment]::NewLine + $needle,
+            1
+          )
           [System.IO.File]::WriteAllText((Resolve-Path $path), $modified, [System.Text.UTF8Encoding]::new($false))
 
           $check = Select-String -Path $path -Pattern '03E12BF8A5730E26'
