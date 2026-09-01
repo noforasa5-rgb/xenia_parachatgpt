@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 src = Path("prey-sdk/src/Prey/prey_weaponfirecontroller.cpp")
 text = src.read_text(encoding="latin-1")
@@ -138,6 +139,9 @@ print("MSVC compatibility patched:", interp)
 
 simd = Path("prey-sdk/src/idLib/math/Simd.cpp")
 simd_text = simd.read_text(encoding="latin-1")
-simd_text = simd_text.replace('S_COLOR_RED"X"', 'S_COLOR_RED "X"')
+# VC2005 accepted constructs such as "text "S_COLOR_RED"X". Modern C++
+# parses the middle token as a user-defined literal suffix. Add whitespace
+# around every S_COLOR_* macro that is sandwiched by string literals.
+simd_text = re.sub(r'(?<=")(S_COLOR_[A-Z]+)(?=")', r' \1 ', simd_text)
 simd.write_text(simd_text, encoding="latin-1")
 print("MSVC compatibility patched:", simd)
