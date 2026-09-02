@@ -137,11 +137,22 @@ if old_midpoint in interp_text:
 interp.write_text(interp_text, encoding="latin-1")
 print("MSVC compatibility patched:", interp)
 
-simd = Path("prey-sdk/src/idLib/math/Simd.cpp")
-simd_text = simd.read_text(encoding="latin-1")
-# VC2005 accepted constructs such as "text "S_COLOR_RED"X". Modern C++
-# parses the middle token as a user-defined literal suffix. Add whitespace
-# around every S_COLOR_* macro that is sandwiched by string literals.
-simd_text = re.sub(r'(?<=")(S_COLOR_[A-Z]+)(?=")', r' \1 ', simd_text)
-simd.write_text(simd_text, encoding="latin-1")
-print("MSVC compatibility patched:", simd)
+# VC2005 accepted constructs such as S_COLOR_WHITE"text" and
+# "text"S_COLOR_RED"X". Modern C++ interprets those as user-defined literal
+# suffixes. Normalize every source/header occurrence in the official SDK.
+source_root = Path("prey-sdk/src")
+patched_color_files = 0
+for path in source_root.rglob("*"):
+    if path.suffix.lower() not in {".cpp", ".c", ".h", ".hpp"}:
+        continue
+    try:
+        source_text = path.read_text(encoding="latin-1")
+    except OSError:
+        continue
+    fixed_text = re.sub(r'(?<=")(S_COLOR_[A-Z]+)', r' \1', source_text)
+    fixed_text = re.sub(r'(S_COLOR_[A-Z]+)(?=")', r'\1 ', fixed_text)
+    if fixed_text != source_text:
+        path.write_text(fixed_text, encoding="latin-1")
+        patched_color_files += 1
+        print("MSVC color-macro compatibility patched:", path)
+print("Color-macro files patched:", patched_color_files)
