@@ -32,13 +32,8 @@ jobs:
             try {
               Write-Host "Trying $url"
               Invoke-WebRequest -Uri $url -OutFile PREY_SDK_2006-10-13.zip -TimeoutSec 120
-              if ((Get-Item PREY_SDK_2006-10-13.zip).Length -gt 3000000) {
-                $downloaded = $true
-                break
-              }
-            } catch {
-              Write-Warning $_
-            }
+              if ((Get-Item PREY_SDK_2006-10-13.zip).Length -gt 3000000) { $downloaded = $true; break }
+            } catch { Write-Warning $_ }
           }
           if (-not $downloaded) { throw 'Could not download the official PREY SDK from any mirror.' }
           Get-FileHash PREY_SDK_2006-10-13.zip -Algorithm MD5
@@ -54,28 +49,13 @@ jobs:
           $preyDir = Split-Path $weapon.FullName -Parent
           $srcRoot = Split-Path $preyDir -Parent
           Write-Host "Official SDK source root: $srcRoot"
-
           New-Item -ItemType Directory -Force -Path prey-sdk/src | Out-Null
           Copy-Item "$srcRoot\*" prey-sdk/src -Recurse -Force
 
-          $projects = Get-ChildItem prey-sdk/src -Filter *.vcproj -Recurse
-          $gameProj = $projects | Where-Object { Select-String -Path $_.FullName -Pattern 'prey_weaponfirecontroller.cpp' -Quiet } | Select-Object -First 1
-          $idProj = $projects | Where-Object { Select-String -Path $_.FullName -Pattern 'Base64.cpp' -Quiet } | Select-Object -First 1
-          if (-not $gameProj) { throw 'Could not identify the official game vcproj.' }
-          if (-not $idProj) { throw 'Could not identify the official idLib vcproj.' }
-          Write-Host "Game project: $($gameProj.FullName)"
-          Write-Host "idLib project: $($idProj.FullName)"
-          Copy-Item $gameProj.FullName prey-sdk/src/2005game.vcproj -Force
-          Copy-Item $idProj.FullName prey-sdk/src/2005idlib.vcproj -Force
-
-          $def = Get-ChildItem prey-sdk/src -Filter game.def -Recurse | Select-Object -First 1
-          if (-not $def) { throw 'game.def not found in official SDK.' }
-          New-Item -ItemType Directory -Force -Path prey-sdk/src/game | Out-Null
-          if ($def.FullName -ne (Resolve-Path prey-sdk/src/game -ErrorAction SilentlyContinue).Path + '\game.def') {
-            Copy-Item $def.FullName prey-sdk/src/game/game.def -Force
-          }
-
-          Get-ChildItem prey-sdk/src -Depth 2 | Select-Object -First 100 FullName
+          if (-not (Test-Path prey-sdk/src/2005game.vcproj)) { throw 'Official 2005game.vcproj not found.' }
+          if (-not (Test-Path prey-sdk/src/2005idlib.vcproj)) { throw 'Official 2005idlib.vcproj not found.' }
+          if (-not (Test-Path prey-sdk/src/game/game.def)) { throw 'Official game/game.def not found.' }
+          Write-Host 'Official Visual Studio 2005 projects located successfully.'
 
       - name: Apply Xbox 360 aim-assist diagnostic port
         shell: pwsh
@@ -85,18 +65,15 @@ jobs:
 
       - name: Generate modern Win32 build files from original VS2005 projects
         shell: pwsh
-        run: |
-          python prey_aimassist/gen_cmake.py
+        run: python prey_aimassist/gen_cmake.py
 
       - name: Configure Win32 Release
         shell: pwsh
-        run: |
-          cmake -S prey-sdk/src -B prey-build -A Win32
+        run: cmake -S prey-sdk/src -B prey-build -A Win32
 
       - name: Build retail-compatible gamex86.dll
         shell: pwsh
-        run: |
-          cmake --build prey-build --config Release --target gamex86 -- /m
+        run: cmake --build prey-build --config Release --target gamex86 -- /m
 
       - name: Inspect and package diagnostic DLL
         shell: pwsh
@@ -131,9 +108,6 @@ jobs:
           This is a first diagnostic build intended to verify loading and target selection.
           "@ | Set-Content artifact/README_TEST.txt
 
-          "DLL: $($dll.FullName)"
-          "SHA256: $hash"
-
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Filter dumpbin.exe -Recurse | Where-Object { $_.FullName -match '\\Hostx64\\x86\\dumpbin.exe$' } | Select-Object -First 1
@@ -142,6 +116,8 @@ jobs:
             & $dumpbin.FullName /exports artifact/gamex86.dll | Out-File artifact/EXPORTS.txt
             & $dumpbin.FullName /dependents artifact/gamex86.dll | Out-File artifact/DEPENDENTS.txt
           }
+          "DLL: $($dll.FullName)"
+          "SHA256: $hash"
 
       - name: Upload diagnostic build
         uses: actions/upload-artifact@v4
