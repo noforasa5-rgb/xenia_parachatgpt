@@ -13,17 +13,17 @@ if include_needle not in text:
 block = r'''
 
 // -----------------------------------------------------------------------------
-// Xbox 360 Aim Assist diagnostic port
+// Xbox 360 Aim Assist port
 // Reconstructed from the retail Xbox 360 default.xex supplied for comparison.
 // The original console variables/defaults are preserved here so they can be
-// tuned from the Prey console while testing.
+// tuned from the Prey console if desired.
 // -----------------------------------------------------------------------------
 idCVar ui_aimAssist( "ui_aimAssist", "1", CVAR_GAME | CVAR_ARCHIVE | CVAR_BOOL, "Xbox 360 style projectile aim assist" );
 idCVar AA_MinDist( "AA_MinDist", "90", CVAR_GAME | CVAR_FLOAT, "Aim Assist Min Distance" );
 idCVar AA_MaxDist( "AA_MaxDist", "680", CVAR_GAME | CVAR_FLOAT, "Aim Assist Max Distance" );
 idCVar AA_MinDot( "AA_MinDot", "0.98", CVAR_GAME | CVAR_FLOAT, "Aim Assist Min Dot" );
 idCVar AA_Width( "AA_Width", "75", CVAR_GAME | CVAR_FLOAT, "Aim Assist Corridor Width" );
-idCVar AA_Debug( "AA_Debug", "1", CVAR_GAME | CVAR_BOOL, "Print Xbox 360 aim-assist target selection when firing" );
+idCVar AA_Debug( "AA_Debug", "0", CVAR_GAME | CVAR_BOOL, "Print Xbox 360 aim-assist target selection when firing" );
 
 static idEntity *HH_FindXbox360AimAssistTarget( const idVec3 &muzzlePos, const idMat3 &weaponAxis,
                                                 hhPlayer *player, float &outDot,
