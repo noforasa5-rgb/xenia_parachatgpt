@@ -66,7 +66,7 @@ add_library(gamex86 SHARED
 )
 target_compile_definitions(gamex86 PRIVATE
     _D3SDK __DOOM__ GAME_DLL WIN32 NDEBUG _WINDOWS HUMANHEAD _DOTNET_2005
-    _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE
+    _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE _ALLOW_KEYWORD_MACROS
 )
 target_compile_options(gamex86 PRIVATE
     /O2 /Ob2 /Oi /Ot /Oy /Gy /GR /W3 /MP /Zc:twoPhase-
