@@ -19,12 +19,63 @@ jobs:
       - name: Checkout build scripts
         uses: actions/checkout@v4
 
-      - name: Checkout PREY 2006 SDK game sources
-        uses: actions/checkout@v4
-        with:
-          repository: themuffinator/openPREY-game
-          ref: d224b083d70dddae1b8ba00081b4d72dedd8bc03
-          path: prey-sdk
+      - name: Download official Human Head PREY SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $urls = @(
+            'https://duke4ever.altervista.org/prey/files/PREY_SDK_2006-10-13.zip',
+            'https://ftp.zx.net.nz/pub/mirror/ftp.3drealms.com/source/PREY_SDK_2006-10-13.zip'
+          )
+          $downloaded = $false
+          foreach ($url in $urls) {
+            try {
+              Write-Host "Trying $url"
+              Invoke-WebRequest -Uri $url -OutFile PREY_SDK_2006-10-13.zip -TimeoutSec 120
+              if ((Get-Item PREY_SDK_2006-10-13.zip).Length -gt 3000000) {
+                $downloaded = $true
+                break
+              }
+            } catch {
+              Write-Warning $_
+            }
+          }
+          if (-not $downloaded) { throw 'Could not download the official PREY SDK from any mirror.' }
+          Get-FileHash PREY_SDK_2006-10-13.zip -Algorithm MD5
+          Get-FileHash PREY_SDK_2006-10-13.zip -Algorithm SHA256
+          Expand-Archive PREY_SDK_2006-10-13.zip -DestinationPath prey-official -Force
+
+      - name: Normalize official SDK source tree
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $weapon = Get-ChildItem prey-official -Filter prey_weaponfirecontroller.cpp -Recurse | Select-Object -First 1
+          if (-not $weapon) { throw 'prey_weaponfirecontroller.cpp not found in official SDK.' }
+          $preyDir = Split-Path $weapon.FullName -Parent
+          $srcRoot = Split-Path $preyDir -Parent
+          Write-Host "Official SDK source root: $srcRoot"
+
+          New-Item -ItemType Directory -Force -Path prey-sdk/src | Out-Null
+          Copy-Item "$srcRoot\*" prey-sdk/src -Recurse -Force
+
+          $projects = Get-ChildItem prey-sdk/src -Filter *.vcproj -Recurse
+          $gameProj = $projects | Where-Object { Select-String -Path $_.FullName -Pattern 'prey_weaponfirecontroller.cpp' -Quiet } | Select-Object -First 1
+          $idProj = $projects | Where-Object { Select-String -Path $_.FullName -Pattern 'Base64.cpp' -Quiet } | Select-Object -First 1
+          if (-not $gameProj) { throw 'Could not identify the official game vcproj.' }
+          if (-not $idProj) { throw 'Could not identify the official idLib vcproj.' }
+          Write-Host "Game project: $($gameProj.FullName)"
+          Write-Host "idLib project: $($idProj.FullName)"
+          Copy-Item $gameProj.FullName prey-sdk/src/2005game.vcproj -Force
+          Copy-Item $idProj.FullName prey-sdk/src/2005idlib.vcproj -Force
+
+          $def = Get-ChildItem prey-sdk/src -Filter game.def -Recurse | Select-Object -First 1
+          if (-not $def) { throw 'game.def not found in official SDK.' }
+          New-Item -ItemType Directory -Force -Path prey-sdk/src/game | Out-Null
+          if ($def.FullName -ne (Resolve-Path prey-sdk/src/game -ErrorAction SilentlyContinue).Path + '\game.def') {
+            Copy-Item $def.FullName prey-sdk/src/game/game.def -Force
+          }
+
+          Get-ChildItem prey-sdk/src -Depth 2 | Select-Object -First 100 FullName
 
       - name: Apply Xbox 360 aim-assist diagnostic port
         shell: pwsh
@@ -60,6 +111,7 @@ jobs:
           PREY 2006 - Xbox 360 Aim Assist - DIAGNOSTIC BUILD
 
           Target: retail PREY.exe 1.4 (Win32)
+          Base source: official Human Head PREY SDK, 13 Oct 2006
           Game DLL: gamex86.dll
 
           Reconstructed Xbox 360 defaults:
@@ -88,6 +140,7 @@ jobs:
           if ($dumpbin) {
             & $dumpbin.FullName /headers artifact/gamex86.dll | Out-File artifact/PE_HEADERS.txt
             & $dumpbin.FullName /exports artifact/gamex86.dll | Out-File artifact/EXPORTS.txt
+            & $dumpbin.FullName /dependents artifact/gamex86.dll | Out-File artifact/DEPENDENTS.txt
           }
 
       - name: Upload diagnostic build
