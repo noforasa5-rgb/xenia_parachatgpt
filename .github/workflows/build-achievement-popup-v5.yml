@@ -1,0 +1,146 @@
+name: Build Xenia Canary Xbox 360 Achievement Popup V5
+
+on:
+  push:
+    branches: [achievement-popup-v5]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release Windows x86-64 - Xbox 360 Achievement Popup V5
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+      XENIA_COMMIT: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+
+    steps:
+      - name: Checkout V5 patch source
+        uses: actions/checkout@v6
+        with:
+          path: patchrepo
+          fetch-depth: 1
+
+      - name: Checkout exact Xenia Canary revision
+        uses: actions/checkout@v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+          path: xenia
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify exact revision
+        shell: pwsh
+        working-directory: xenia
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:XENIA_COMMIT) {
+            throw "Wrong Xenia revision: $actual"
+          }
+          Write-Host "Building Xenia Canary commit $actual"
+
+      - name: Apply dashboard 17559 XUR-derived achievement popup V5
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-popup-v5.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Verify V5 patch marker
+        shell: pwsh
+        run: |
+          $path = "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\imgui_guest_notification.cc"
+          $marker = Select-String -Path $path -Pattern 'XBOX360_ORIGINAL_ACHIEVEMENT_V5'
+          if ($marker.Count -ne 1) {
+            throw "V5 patch marker not present exactly once."
+          }
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-xenia-achievement
+          restore-keys: ${{ runner.os }}-vulkan-sdk-
+
+      - name: Install Vulkan SDK with SPIR-V tools
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\VulkanSDK") {
+            Write-Host "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+          }
+          $sdkDir = Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name
+          if (!$sdkDir) { throw "Vulkan SDK directory was not found." }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$sdkDir"
+          $env:PATH += ";${env:VULKAN_SDK}\Bin"
+          "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "${env:VULKAN_SDK}\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Download required submodules
+        shell: pwsh
+        working-directory: xenia
+        run: |
+          $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
+
+      - name: Build Xenia Release
+        shell: pwsh
+        working-directory: xenia
+        run: python xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Verify executable and package
+        shell: pwsh
+        run: |
+          $exe = "$env:GITHUB_WORKSPACE\xenia\build\bin\Windows\Release\xenia_canary.exe"
+          if (!(Test-Path $exe)) {
+            throw "xenia_canary.exe was not produced."
+          }
+          if ((Get-Item $exe).Length -le 100000) {
+            throw "xenia_canary.exe is unexpectedly small."
+          }
+
+          $artifact = "$env:GITHUB_WORKSPACE\artifact"
+          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+          Copy-Item $exe "$artifact\xenia_canary.exe"
+          Copy-Item "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\imgui_guest_notification.cc" `
+                    "$artifact\imgui_guest_notification.v5.cc"
+          Copy-Item "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-popup-v5.ps1" `
+                    "$artifact\apply-achievement-popup-v5.ps1"
+
+          $hash = (Get-FileHash "$artifact\xenia_canary.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenia_canary.exe" | Set-Content "$artifact\SHA256.txt" -Encoding ascii
+
+          @"
+          Xenia Canary Xbox 360 Achievement Popup V5
+          Upstream commit: $env:XENIA_COMMIT
+          Patch marker: XBOX360_ORIGINAL_ACHIEVEMENT_V5
+
+          V5 changes:
+          - Uses the original dashboard 17559 scr_Notification logical geometry.
+          - Uses the original 30 Hz XUI timeline frames 0 through 240.
+          - Body expansion follows bgCurve1 keyframes, including frame-44 overshoot.
+          - Ring backing follows bg/logoback scale overshoot and exit shrink.
+          - Text follows frames 38/44/217/223.
+          - Xbox logo follows xenonLogo1 timing.
+          - Trophy follows Image presenter timing.
+          - Original xenonLogo.png and Achievement.png remain external in xbox360_ui.
+          - Expanded ImGui window prevents XUI overflow geometry from being clipped.
+
+          SHA-256: $hash
+          "@ | Set-Content "$artifact\README_V5.txt" -Encoding ascii
+
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-achievement-popup-v5-a5a18f5c7
+          path: artifact/*
+          if-no-files-found: error
