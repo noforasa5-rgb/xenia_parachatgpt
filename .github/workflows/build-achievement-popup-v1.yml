@@ -1,0 +1,332 @@
+name: Build Xenia Canary Xbox 360 Achievement Popup V1
+
+on:
+  push:
+    branches: [achievement-popup-v1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release Windows x86-64 - Xbox 360 Achievement Popup V1
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+      XENIA_COMMIT: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+
+    steps:
+      - name: Checkout exact Xenia Canary revision
+        uses: actions/checkout@v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify exact revision
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:XENIA_COMMIT) {
+            throw "Wrong Xenia revision: $actual"
+          }
+          Write-Host "Building Xenia Canary commit $actual"
+
+      - name: Apply Xbox 360 classic achievement popup V1
+        shell: pwsh
+        run: |
+          $path = "src/xenia/ui/imgui_guest_notification.cc"
+          $content = Get-Content $path -Raw
+
+          $pattern = '(?ms)^void AchievementNotificationWindow::OnDraw\(ImGuiIO& io\) \{.*?^void XNotifyWindow::OnDraw\(ImGuiIO& io\) \{'
+          $found = [regex]::Matches($content, $pattern)
+          if ($found.Count -ne 1) {
+            throw "Expected exactly one AchievementNotificationWindow::OnDraw block, found $($found.Count)."
+          }
+
+          $replacement = @'
+          void AchievementNotificationWindow::OnDraw(ImGuiIO& io) {
+            // XBOX360_CLASSIC_ACHIEVEMENT_V1
+            // Time-based animation so presentation speed is independent of host FPS.
+            const uint64_t now = Clock::QueryHostUptimeMillis();
+            if (GetCreationTime() == 0) {
+              SetCreationTime(now);
+          #if XE_PLATFORM_WIN32
+              if (!cvars::notification_sound_path.empty()) {
+                auto notification_sound_path = cvars::notification_sound_path;
+                if (std::filesystem::exists(notification_sound_path)) {
+                  PlaySound(std::wstring(notification_sound_path.begin(),
+                                         notification_sound_path.end())
+                                .c_str(),
+                            NULL,
+                            SND_FILENAME | SND_NODEFAULT | SND_NOSTOP | SND_ASYNC);
+                }
+              }
+          #endif
+            }
+
+            const float elapsed =
+                static_cast<float>(now - GetCreationTime()) / 1000.0f;
+
+            constexpr float kOrbIntroEnd = 0.10f;
+            constexpr float kExpandEnd = 0.58f;
+            constexpr float kHoldEnd = 4.15f;
+            constexpr float kCollapseEnd = 4.70f;
+            constexpr float kEndTime = 4.92f;
+
+            if (elapsed >= kEndTime) {
+              delete this;
+              return;
+            }
+
+            const auto clamp01 = [](float value) {
+              return std::fmaxf(0.0f, std::fminf(1.0f, value));
+            };
+            const auto smooth_step = [&clamp01](float value) {
+              const float t = clamp01(value);
+              return t * t * (3.0f - 2.0f * t);
+            };
+
+            // Start as the compact orb, expand with a very small overshoot,
+            // hold, then collapse back into the orb.
+            float open_amount = 0.0f;
+            if (elapsed < kOrbIntroEnd) {
+              open_amount = 0.0f;
+            } else if (elapsed < kExpandEnd) {
+              const float t = clamp01((elapsed - kOrbIntroEnd) /
+                                      (kExpandEnd - kOrbIntroEnd));
+              constexpr float kBack = 1.70158f;
+              constexpr float kBackPlusOne = kBack + 1.0f;
+              const float shifted = t - 1.0f;
+              open_amount = 1.0f + kBackPlusOne * shifted * shifted * shifted +
+                            kBack * shifted * shifted;
+              open_amount = std::fminf(open_amount, 1.055f);
+            } else if (elapsed < kHoldEnd) {
+              open_amount = 1.0f;
+            } else if (elapsed < kCollapseEnd) {
+              open_amount =
+                  1.0f - smooth_step((elapsed - kHoldEnd) /
+                                     (kCollapseEnd - kHoldEnd));
+            } else {
+              open_amount = 0.0f;
+            }
+
+            float capsule_alpha = 1.0f;
+            if (elapsed < 0.10f) {
+              capsule_alpha = smooth_step(elapsed / 0.10f);
+            } else if (elapsed > kCollapseEnd) {
+              capsule_alpha =
+                  1.0f - smooth_step((elapsed - kCollapseEnd) /
+                                     (kEndTime - kCollapseEnd));
+            }
+
+            float text_alpha =
+                smooth_step((elapsed - 0.36f) / 0.22f) *
+                (1.0f - smooth_step((elapsed - 4.02f) / 0.20f));
+            text_alpha = clamp01(text_alpha);
+
+            const ImVec2 screen_size = io.DisplaySize;
+            const float window_scale =
+                std::fminf(screen_size.x / default_drawing_resolution.x,
+                           screen_size.y / default_drawing_resolution.y);
+
+            if (window_scale <= 0.0f || io.Fonts->Fonts.empty()) {
+              return;
+            }
+
+            const float base_font_size = io.Fonts->Fonts[0]->FontSize;
+            const float title_font_px = 18.0f * window_scale;
+            const float description_font_px = 16.0f * window_scale;
+
+            const ImVec2 title_size = io.Fonts->Fonts[0]->CalcTextSizeA(
+                title_font_px, FLT_MAX, -1.0f, GetTitle().data());
+            const ImVec2 description_size = io.Fonts->Fonts[0]->CalcTextSizeA(
+                description_font_px, FLT_MAX, -1.0f, GetDescription().data());
+
+            const float capsule_height = 64.0f * window_scale;
+            const float icon_size = 58.0f * window_scale;
+            const float text_start_x = 76.0f * window_scale;
+            const float requested_width =
+                text_start_x +
+                std::fmaxf(title_size.x, description_size.x) +
+                24.0f * window_scale;
+
+            float final_width =
+                std::fmaxf(335.0f * window_scale, requested_width);
+            final_width = std::fminf(final_width, screen_size.x * 0.82f);
+            final_width = std::fmaxf(final_width, capsule_height + 1.0f);
+
+            float current_width = capsule_height +
+                                  (final_width - capsule_height) * open_amount;
+            current_width = std::fmaxf(capsule_height, current_width);
+
+            const ImVec2 current_notification_size(
+                std::floor(current_width), std::floor(capsule_height));
+            const ImVec2 notification_position =
+                CalculateNotificationScreenPosition(
+                    screen_size, current_notification_size, GetPositionId());
+
+            if (std::isnan(notification_position.x) ||
+                std::isnan(notification_position.y)) {
+              return;
+            }
+
+            ImGui::SetNextWindowSize(current_notification_size);
+            ImGui::SetNextWindowPos(notification_position);
+
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding,
+                                capsule_height * 0.5f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize,
+                                1.0f * window_scale);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, capsule_alpha);
+            ImGui::PushStyleColor(
+                ImGuiCol_WindowBg,
+                ImVec4(0.115f, 0.115f, 0.115f, 0.96f));
+            ImGui::PushStyleColor(
+                ImGuiCol_Border,
+                ImVec4(0.43f, 0.43f, 0.43f, 0.95f));
+
+            ImGui::Begin("Achievement Notification Window", nullptr,
+                         NOTIFY_TOAST_FLAGS);
+            {
+              // Existing Xenia notification texture is preserved in V1, so no
+              // copyrighted Xbox artwork is embedded in the executable.
+              ImGui::SetCursorPos(ImVec2(3.0f * window_scale,
+                                         3.0f * window_scale));
+              ImGui::Image(reinterpret_cast<ImTextureID>(
+                               GetDrawer()->GetNotificationIcon(GetUserIndex())),
+                           ImVec2(icon_size, icon_size));
+
+              if (text_alpha > 0.001f && open_amount > 0.62f) {
+                ImGui::SetWindowFontScale(title_font_px / base_font_size);
+                ImGui::SetCursorPos(ImVec2(text_start_x,
+                                           8.0f * window_scale));
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, text_alpha), "%s",
+                                   GetTitle().data());
+
+                ImGui::SetWindowFontScale(description_font_px / base_font_size);
+                ImGui::SetCursorPos(ImVec2(text_start_x,
+                                           34.0f * window_scale));
+                ImGui::TextColored(
+                    ImVec4(0.90f, 0.90f, 0.90f, text_alpha), "%s",
+                    GetDescription().data());
+              }
+            }
+            ImGui::End();
+
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar(4);
+          }
+
+          void XNotifyWindow::OnDraw(ImGuiIO& io) {
+          '@
+
+          $modified = [regex]::Replace($content, $pattern, $replacement, 1)
+          if ($modified -eq $content) {
+            throw "Achievement popup source was not modified."
+          }
+
+          [System.IO.File]::WriteAllText(
+            (Resolve-Path $path),
+            $modified,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          $marker = Select-String -Path $path -Pattern 'XBOX360_CLASSIC_ACHIEVEMENT_V1'
+          if ($marker.Count -ne 1) {
+            throw "V1 marker was not inserted exactly once."
+          }
+
+          $manager = "src/xenia/kernel/xam/achievement_manager.cc"
+          $managerText = Get-Content $manager -Raw
+          if (!$managerText.Contains('"Achievement unlocked"') -or
+              !$managerText.Contains('fmt::format("{}G - {}"')) {
+            throw "AchievementManager text format differs from expected a5a18f5c7 layout."
+          }
+
+          Write-Host "Xbox 360-style time-based achievement popup V1 inserted."
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-${{ hashFiles('**/vulkan-sdk.exe') }}
+          restore-keys: ${{ runner.os }}-vulkan-sdk-
+
+      - name: Install Vulkan SDK with SPIR-V tools
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\VulkanSDK") {
+            Write-Host "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+          }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$(Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name)"
+          $env:PATH += ";${env:VULKAN_SDK}\Bin"
+          "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "${env:VULKAN_SDK}\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+          foreach ($tool in @("glslangValidator", "spirv-opt", "spirv-dis")) {
+            $toolPath = "${env:VULKAN_SDK}\Bin\${tool}.exe"
+            if (Test-Path $toolPath) {
+              Write-Host "$tool found at $toolPath"
+              & $toolPath --version 2>$null
+            } else {
+              Write-Warning "${tool}.exe not found at expected location"
+            }
+          }
+
+      - name: Download required submodules
+        shell: pwsh
+        run: |
+          $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
+
+      - name: Build Xenia Release
+        shell: pwsh
+        run: python xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Verify executable and calculate SHA-256
+        id: package
+        shell: pwsh
+        run: |
+          $exe = "build\bin\Windows\Release\xenia_canary.exe"
+          if (!(Test-Path $exe)) {
+            throw "xenia_canary.exe was not produced."
+          }
+          if ((Get-Item $exe).Length -le 100000) {
+            throw "xenia_canary.exe is unexpectedly small."
+          }
+
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item $exe "artifact\xenia_canary.exe"
+          Copy-Item "src\xenia\ui\imgui_guest_notification.cc" "artifact\imgui_guest_notification.v1.cc"
+
+          $hash = (Get-FileHash "artifact\xenia_canary.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenia_canary.exe" | Set-Content "artifact\SHA256.txt" -Encoding ascii
+
+          @"
+          Xenia Canary Xbox 360 Achievement Popup V1
+          Upstream commit: $env:XENIA_COMMIT
+          Patch marker: XBOX360_CLASSIC_ACHIEVEMENT_V1
+          SHA-256: $hash
+          "@ | Set-Content "artifact\BUILD_INFO.txt" -Encoding ascii
+
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-achievement-popup-v1-a5a18f5c7
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
