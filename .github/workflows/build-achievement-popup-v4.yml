@@ -1,0 +1,618 @@
+name: Build Xenia Canary Xbox 360 Achievement Popup V4
+
+on:
+  push:
+    branches: [achievement-popup-v4]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release Windows x86-64 - Xbox 360 Achievement Popup V4
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+      XENIA_COMMIT: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+
+    steps:
+      - name: Checkout exact Xenia Canary revision
+        uses: actions/checkout@v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify exact revision
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:XENIA_COMMIT) {
+            throw "Wrong Xenia revision: $actual"
+          }
+          Write-Host "Building Xenia Canary commit $actual"
+
+      - name: Add external original Xbox 360 achievement assets support
+        shell: pwsh
+        run: |
+          $h = "src/xenia/ui/imgui_drawer.h"
+          $hc = Get-Content $h -Raw
+
+          $needle = @'
+            ImmediateTexture* GetLockedAchievementIcon() {
+              return locked_achievement_icon_.get();
+            }
+          '@
+          $insert = @'
+            ImmediateTexture* GetXbox360AchievementLogo() {
+              return xbox360_achievement_logo_.get();
+            }
+
+            ImmediateTexture* GetXbox360AchievementTrophy() {
+              return xbox360_achievement_trophy_.get();
+            }
+
+            ImmediateTexture* GetLockedAchievementIcon() {
+              return locked_achievement_icon_.get();
+            }
+          '@
+          if (!$hc.Contains($needle)) { throw "imgui_drawer.h getter anchor not found" }
+          $hc = $hc.Replace($needle, $insert)
+
+          $memberNeedle = @'
+            std::unique_ptr<ImmediateTexture> locked_achievement_icon_;
+
+            std::vector<std::unique_ptr<ImmediateTexture>> notification_icon_textures_;
+          '@
+          $memberInsert = @'
+            std::unique_ptr<ImmediateTexture> locked_achievement_icon_;
+            std::unique_ptr<ImmediateTexture> xbox360_achievement_logo_;
+            std::unique_ptr<ImmediateTexture> xbox360_achievement_trophy_;
+
+            std::vector<std::unique_ptr<ImmediateTexture>> notification_icon_textures_;
+          '@
+          if (!$hc.Contains($memberNeedle)) { throw "imgui_drawer.h member anchor not found" }
+          $hc = $hc.Replace($memberNeedle, $memberInsert)
+          [IO.File]::WriteAllText((Resolve-Path $h), $hc, [Text.UTF8Encoding]::new($false))
+
+          $cc = "src/xenia/ui/imgui_drawer.cc"
+          $ccc = Get-Content $cc -Raw
+          if (!$ccc.Contains('#include <cstring>')) { throw "imgui_drawer.cc include anchor not found" }
+          $ccc = $ccc.Replace('#include <cstring>', "#include <cstring>`n#include <fstream>")
+
+          $cvarNeedle = @'
+          DEFINE_path(
+              custom_font_path, "",
+              "Allows user to load custom font and use it instead of default one.", "UI");
+          '@
+          $cvarInsert = @'
+          DEFINE_path(
+              custom_font_path, "",
+              "Allows user to load custom font and use it instead of default one.", "UI");
+
+          DEFINE_path(
+              xbox360_achievement_assets_path, "xbox360_ui",
+              "Folder containing xenonLogo.png and Achievement.png extracted from the user's own Xbox 360 dashboard.",
+              "UI");
+          '@
+          if (!$ccc.Contains($cvarNeedle)) { throw "imgui_drawer.cc cvar anchor not found" }
+          $ccc = $ccc.Replace($cvarNeedle, $cvarInsert)
+
+          $resetNeedle = @'
+              locked_achievement_icon_.reset();
+              notification_icon_textures_.clear();
+          '@
+          $resetInsert = @'
+              locked_achievement_icon_.reset();
+              xbox360_achievement_logo_.reset();
+              xbox360_achievement_trophy_.reset();
+              notification_icon_textures_.clear();
+          '@
+          if (!$ccc.Contains($resetNeedle)) { throw "imgui_drawer.cc reset anchor not found" }
+          $ccc = $ccc.Replace($resetNeedle, $resetInsert)
+
+          $loadNeedle = @'
+              SetupFontTexture();
+              SetupNotificationTextures();
+
+              // Load locked achievement icon.
+          '@
+          $loadInsert = @'
+              SetupFontTexture();
+              SetupNotificationTextures();
+
+              const std::filesystem::path xbox360_asset_root =
+                  cvars::xbox360_achievement_assets_path;
+              const auto load_external_png =
+                  [this](const std::filesystem::path& path)
+                  -> std::unique_ptr<ImmediateTexture> {
+                std::ifstream file(path, std::ios::binary | std::ios::ate);
+                if (!file) {
+                  return {};
+                }
+                const std::streampos end = file.tellg();
+                if (end <= 0) {
+                  return {};
+                }
+                std::vector<uint8_t> bytes(static_cast<size_t>(end));
+                file.seekg(0, std::ios::beg);
+                file.read(reinterpret_cast<char*>(bytes.data()),
+                          static_cast<std::streamsize>(bytes.size()));
+                if (!file) {
+                  return {};
+                }
+                return LoadImGuiIcon(bytes);
+              };
+
+              xbox360_achievement_logo_ = load_external_png(
+                  xbox360_asset_root / "xenonLogo.png");
+              xbox360_achievement_trophy_ = load_external_png(
+                  xbox360_asset_root / "Achievement.png");
+
+              if (!xbox360_achievement_logo_ || !xbox360_achievement_trophy_) {
+                XELOGW(
+                    "Xbox 360 achievement V4 assets not fully loaded from '{}'. "
+                    "Expected xenonLogo.png and Achievement.png.",
+                    xe::path_to_utf8(xbox360_asset_root));
+              } else {
+                XELOGI("Xbox 360 achievement V4 original assets loaded from '{}'",
+                       xe::path_to_utf8(xbox360_asset_root));
+              }
+
+              // Load locked achievement icon.
+          '@
+          if (!$ccc.Contains($loadNeedle)) { throw "imgui_drawer.cc load anchor not found" }
+          $ccc = $ccc.Replace($loadNeedle, $loadInsert)
+          [IO.File]::WriteAllText((Resolve-Path $cc), $ccc, [Text.UTF8Encoding]::new($false))
+
+          Write-Host "External Xbox 360 V4 asset support inserted."
+
+      - name: Apply Xbox 360 dashboard-derived achievement popup V4
+        shell: pwsh
+        run: |
+          $path = "src/xenia/ui/imgui_guest_notification.cc"
+          $content = Get-Content $path -Raw
+          $pattern = '(?ms)^void AchievementNotificationWindow::OnDraw\(ImGuiIO& io\) \{.*?^void XNotifyWindow::OnDraw\(ImGuiIO& io\) \{'
+          $found = [regex]::Matches($content, $pattern)
+          if ($found.Count -ne 1) {
+            throw "Expected exactly one AchievementNotificationWindow::OnDraw block, found $($found.Count)."
+          }
+
+          $replacement = @'
+          void AchievementNotificationWindow::OnDraw(ImGuiIO& io) {
+            // XBOX360_ORIGINAL_ACHIEVEMENT_V4
+            // Geometry is based on the user's own dashboard 2.0.17559.0
+            // skin.xur / scr_Notification data, rather than V3 eye-balling:
+            //   scr_Notification logical canvas: 370 x 61
+            //   bgCurve1: 356 x 39 at Y=10
+            //   xenonLogo1: 58 x 58 at X=3.76876 Y=0.204125
+            //   TextPresenter: 283 x 60 at X=59, PointSize=11
+            // The original xenonLogo.png and Achievement.png remain external.
+            const uint64_t now = Clock::QueryHostUptimeMillis();
+            if (GetCreationTime() == 0) {
+              SetCreationTime(now);
+          #if XE_PLATFORM_WIN32
+              if (!cvars::notification_sound_path.empty()) {
+                auto notification_sound_path = cvars::notification_sound_path;
+                if (std::filesystem::exists(notification_sound_path)) {
+                  PlaySound(std::wstring(notification_sound_path.begin(),
+                                         notification_sound_path.end())
+                                .c_str(),
+                            NULL,
+                            SND_FILENAME | SND_NODEFAULT | SND_NOSTOP | SND_ASYNC);
+                }
+              }
+          #endif
+            }
+
+            const float elapsed =
+                static_cast<float>(now - GetCreationTime()) / 1000.0f;
+
+            constexpr float kExpandStart = 0.03f;
+            constexpr float kExpandEnd = 0.48f;
+            constexpr float kRingStart = 0.18f;
+            constexpr float kRingEnd = 0.48f;
+            constexpr float kTextInStart = 0.30f;
+            constexpr float kTextInEnd = 0.56f;
+            constexpr float kTextOutStart = 5.34f;
+            constexpr float kTextOutEnd = 5.56f;
+            constexpr float kCollapseStart = 5.54f;
+            constexpr float kCollapseEnd = 6.00f;
+            constexpr float kEndTime = 6.20f;
+
+            if (elapsed >= kEndTime) {
+              delete this;
+              return;
+            }
+
+            const auto clamp01 = [](float v) {
+              return std::fmaxf(0.0f, std::fminf(1.0f, v));
+            };
+            const auto smooth_step = [&clamp01](float v) {
+              const float t = clamp01(v);
+              return t * t * (3.0f - 2.0f * t);
+            };
+            const auto ease_out_cubic = [&clamp01](float v) {
+              const float t = clamp01(v);
+              const float q = 1.0f - t;
+              return 1.0f - q * q * q;
+            };
+
+            float open_amount = 0.0f;
+            if (elapsed < kExpandStart) {
+              open_amount = 0.0f;
+            } else if (elapsed < kExpandEnd) {
+              open_amount = ease_out_cubic(
+                  (elapsed - kExpandStart) / (kExpandEnd - kExpandStart));
+            } else if (elapsed < kCollapseStart) {
+              open_amount = 1.0f;
+            } else if (elapsed < kCollapseEnd) {
+              open_amount = 1.0f - smooth_step(
+                  (elapsed - kCollapseStart) /
+                  (kCollapseEnd - kCollapseStart));
+            }
+
+            float master_alpha = smooth_step(elapsed / 0.09f);
+            if (elapsed > kCollapseEnd) {
+              master_alpha *= 1.0f - smooth_step(
+                  (elapsed - kCollapseEnd) / (kEndTime - kCollapseEnd));
+            }
+
+            float text_alpha = smooth_step(
+                (elapsed - kTextInStart) / (kTextInEnd - kTextInStart));
+            if (elapsed > kTextOutStart) {
+              text_alpha *= 1.0f - smooth_step(
+                  (elapsed - kTextOutStart) /
+                  (kTextOutEnd - kTextOutStart));
+            }
+            text_alpha = clamp01(text_alpha) * master_alpha;
+
+            const float ring_t = smooth_step(
+                (elapsed - kRingStart) / (kRingEnd - kRingStart));
+            // The original bg group starts near Scale=0.153571 / Opacity=0.
+            const float ring_scale = 0.153571f + 0.846429f * ring_t;
+            const float ring_alpha = ring_t * master_alpha;
+
+            const ImVec2 screen_size = io.DisplaySize;
+            const float scale =
+                std::fminf(screen_size.x / default_drawing_resolution.x,
+                           screen_size.y / default_drawing_resolution.y);
+            if (scale <= 0.0f || io.Fonts->Fonts.empty()) {
+              return;
+            }
+
+            constexpr float kLogicalW = 370.0f;
+            constexpr float kLogicalH = 61.0f;
+            const ImVec2 window_size(std::floor(kLogicalW * scale),
+                                     std::floor(kLogicalH * scale));
+            const ImVec2 position = CalculateNotificationScreenPosition(
+                screen_size, window_size, GetPositionId());
+            if (std::isnan(position.x) || std::isnan(position.y)) {
+              return;
+            }
+
+            ImGui::SetNextWindowSize(window_size);
+            ImGui::SetNextWindowPos(position);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                                  ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+
+            ImGui::Begin("Achievement Notification Window", nullptr,
+                         NOTIFY_TOAST_FLAGS);
+            {
+              ImDrawList* dl = ImGui::GetWindowDrawList();
+              const ImVec2 wp = ImGui::GetWindowPos();
+              const auto C = [master_alpha](int r, int g, int b, int a) {
+                return IM_COL32(r, g, b,
+                    static_cast<int>(std::fmaxf(0.0f, std::fminf(255.0f,
+                        static_cast<float>(a) * master_alpha))));
+              };
+
+              // Original bgCurve1 occupies a 39-pixel-high strip inside the
+              // 61-pixel notification canvas. Crucially, it begins UNDER the
+              // orb rather than to the right of it. This fixes V3's
+              // "circle glued outside the capsule" look.
+              const float bar_x0 = wp.x;
+              const float collapsed_right = wp.x + 42.0f * scale;
+              const float bar_x1_final = wp.x + kLogicalW * scale;
+              const float bar_x1 = collapsed_right +
+                  (bar_x1_final - collapsed_right) * open_amount;
+              const float bar_y0 = wp.y + 10.0f * scale;
+              const float bar_y1 = bar_y0 + 39.0f * scale;
+              const float bar_r = 19.5f * scale;
+
+              if (bar_x1 > bar_x0 + 2.0f * scale) {
+                // Soft shadow / halo. Multiple low-alpha shells are used
+                // instead of the hard single border used by V3.
+                dl->AddRectFilled(
+                    ImVec2(bar_x0 - 2.5f * scale, bar_y0 - 2.5f * scale),
+                    ImVec2(bar_x1 + 2.5f * scale, bar_y1 + 3.0f * scale),
+                    C(0, 0, 0, 72), bar_r + 3.0f * scale);
+                dl->AddRectFilled(
+                    ImVec2(bar_x0 - 1.2f * scale, bar_y0 - 1.2f * scale),
+                    ImVec2(bar_x1 + 1.2f * scale, bar_y1 + 1.7f * scale),
+                    C(25, 25, 25, 188), bar_r + 1.8f * scale);
+
+                // Metallic outer lip.
+                dl->AddRectFilled(ImVec2(bar_x0, bar_y0),
+                                  ImVec2(bar_x1, bar_y1),
+                                  C(133, 133, 133, 212), bar_r);
+
+                // Dark separator just inside the metallic lip.
+                const float rim1 = 2.0f * scale;
+                dl->AddRectFilled(
+                    ImVec2(bar_x0 + rim1, bar_y0 + rim1),
+                    ImVec2(bar_x1 - rim1, bar_y1 - rim1),
+                    C(35, 35, 35, 228),
+                    std::fmaxf(0.0f, bar_r - rim1));
+
+                // Translucent graphite body. The console background remains
+                // faintly visible through it.
+                const float rim2 = 3.4f * scale;
+                dl->AddRectFilled(
+                    ImVec2(bar_x0 + rim2, bar_y0 + rim2),
+                    ImVec2(bar_x1 - rim2, bar_y1 - rim2),
+                    C(72, 72, 72, 212),
+                    std::fmaxf(0.0f, bar_r - rim2));
+
+                // Subtle top silver sheen and dark lower bevel.
+                dl->AddLine(
+                    ImVec2(bar_x0 + 21.0f * scale, bar_y0 + 2.2f * scale),
+                    ImVec2(std::fmaxf(bar_x0 + 21.0f * scale,
+                                     bar_x1 - 21.0f * scale),
+                           bar_y0 + 2.2f * scale),
+                    C(205, 205, 205, 112), 1.0f * scale);
+                dl->AddLine(
+                    ImVec2(bar_x0 + 21.0f * scale, bar_y1 - 2.0f * scale),
+                    ImVec2(std::fmaxf(bar_x0 + 21.0f * scale,
+                                     bar_x1 - 21.0f * scale),
+                           bar_y1 - 2.0f * scale),
+                    C(12, 12, 12, 142), 1.0f * scale);
+              }
+
+              // The dashboard's xenonLogo1 is 58x58 at (3.76876, 0.204125)
+              // inside a 370x61 canvas. The orb therefore stays INSIDE the
+              // same structure instead of hanging off the left edge.
+              const ImVec2 orb_p0(wp.x + 3.76876f * scale,
+                                  wp.y + 0.204125f * scale);
+              const ImVec2 orb_p1(orb_p0.x + 58.0f * scale,
+                                  orb_p0.y + 58.0f * scale);
+              const ImVec2 orb_c(orb_p0.x + 29.0f * scale,
+                                 orb_p0.y + 29.0f * scale);
+
+              // Dark disc and soft outer edge underneath the original logo.
+              dl->AddCircleFilled(orb_c, 29.0f * scale,
+                                  C(15, 15, 15, 236), 64);
+              dl->AddCircle(orb_c, 29.0f * scale,
+                            C(185, 185, 185, 214), 64, 1.3f * scale);
+
+              // Filled annular sectors, not generic thick arc strokes. This
+              // gives the flat radial cuts and substantial segmented ring seen
+              // on the real Xbox 360 notification.
+              const auto draw_sector =
+                  [dl, scale, &orb_c](float a0, float a1,
+                                      float r_outer, float r_inner,
+                                      ImU32 color) {
+                constexpr float kPi = 3.14159265358979323846f;
+                constexpr int kSteps = 12;
+                for (int i = 0; i < kSteps; ++i) {
+                  const float t0 = static_cast<float>(i) / kSteps;
+                  const float t1 = static_cast<float>(i + 1) / kSteps;
+                  const float aa0 = (a0 + (a1 - a0) * t0) * kPi / 180.0f;
+                  const float aa1 = (a0 + (a1 - a0) * t1) * kPi / 180.0f;
+                  const ImVec2 o0(orb_c.x + std::cos(aa0) * r_outer * scale,
+                                  orb_c.y + std::sin(aa0) * r_outer * scale);
+                  const ImVec2 o1(orb_c.x + std::cos(aa1) * r_outer * scale,
+                                  orb_c.y + std::sin(aa1) * r_outer * scale);
+                  const ImVec2 i0(orb_c.x + std::cos(aa0) * r_inner * scale,
+                                  orb_c.y + std::sin(aa0) * r_inner * scale);
+                  const ImVec2 i1(orb_c.x + std::cos(aa1) * r_inner * scale,
+                                  orb_c.y + std::sin(aa1) * r_inner * scale);
+                  dl->AddTriangleFilled(o0, o1, i1, color);
+                  dl->AddTriangleFilled(o0, i1, i0, color);
+                }
+              };
+
+              const ImU32 ring_gray = IM_COL32(
+                  144, 144, 144,
+                  static_cast<int>(220.0f * ring_alpha));
+              const ImU32 ring_green = IM_COL32(
+                  94, 222, 6,
+                  static_cast<int>(246.0f * ring_alpha));
+              const ImU32 ring_highlight = IM_COL32(
+                  205, 205, 205,
+                  static_cast<int>(108.0f * ring_alpha));
+
+              // Scale the complete ring from the XUI bg group's initial
+              // 0.153571 scale to its presented state.
+              const float ro = 26.5f * ring_scale;
+              const float ri = 20.2f * ring_scale;
+              draw_sector(-174.0f, -96.0f, ro, ri, ring_green);
+              draw_sector(-84.0f, -6.0f, ro, ri, ring_gray);
+              draw_sector(6.0f, 84.0f, ro, ri, ring_gray);
+              draw_sector(96.0f, 174.0f, ro, ri, ring_gray);
+
+              // A thin light edge on the ring helps reproduce the beveled
+              // silver look of the 17559 HUD skin.
+              if (ring_alpha > 0.001f) {
+                dl->AddCircle(orb_c, ro * scale, ring_highlight, 64,
+                              0.75f * scale);
+              }
+
+              // The center swaps between the original xenonLogo.png and the
+              // original white Achievement.png. The timings stay close to the
+              // reference recording until the XUI keyframe timings are fully
+              // reproduced in the later XUI-emulation route.
+              const float symbol_time = std::fmaxf(0.0f, elapsed - 0.30f);
+              const float phase = std::fmodf(symbol_time, 2.0f);
+              float logo_alpha = 1.0f;
+              float trophy_alpha = 0.0f;
+              if (phase >= 0.86f && phase < 1.04f) {
+                const float t = smooth_step((phase - 0.86f) / 0.18f);
+                logo_alpha = 1.0f - t;
+                trophy_alpha = t;
+              } else if (phase >= 1.04f && phase < 1.84f) {
+                logo_alpha = 0.0f;
+                trophy_alpha = 1.0f;
+              } else if (phase >= 1.84f) {
+                const float t = smooth_step((phase - 1.84f) / 0.16f);
+                logo_alpha = t;
+                trophy_alpha = 1.0f - t;
+              }
+              logo_alpha *= master_alpha;
+              trophy_alpha *= master_alpha;
+
+              ImmediateTexture* xbox_logo =
+                  GetDrawer()->GetXbox360AchievementLogo();
+              if (xbox_logo && logo_alpha > 0.001f) {
+                dl->AddImage(
+                    reinterpret_cast<ImTextureID>(xbox_logo), orb_p0, orb_p1,
+                    ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                    IM_COL32(255, 255, 255,
+                             static_cast<int>(255.0f * logo_alpha)));
+              }
+
+              ImmediateTexture* trophy =
+                  GetDrawer()->GetXbox360AchievementTrophy();
+              if (trophy && trophy_alpha > 0.001f) {
+                const float trophy_size = 27.0f * scale;
+                const ImVec2 tp0(orb_c.x - trophy_size * 0.5f,
+                                 orb_c.y - trophy_size * 0.5f);
+                const ImVec2 tp1(tp0.x + trophy_size,
+                                 tp0.y + trophy_size);
+                dl->AddCircleFilled(orb_c, 18.0f * scale,
+                    IM_COL32(12, 12, 12,
+                             static_cast<int>(235.0f * trophy_alpha)));
+                dl->AddImage(
+                    reinterpret_cast<ImTextureID>(trophy), tp0, tp1,
+                    ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f),
+                    IM_COL32(255, 255, 255,
+                             static_cast<int>(255.0f * trophy_alpha)));
+              }
+
+              if (text_alpha > 0.001f && open_amount > 0.60f) {
+                ImFont* font = io.Fonts->Fonts[0];
+                const float title_px = 17.5f * scale;
+                const float desc_px = 16.5f * scale;
+                const ImU32 text_col = IM_COL32(
+                    235, 235, 235,
+                    static_cast<int>(255.0f * text_alpha));
+                dl->AddText(font, title_px,
+                    ImVec2(wp.x + 59.0f * scale,
+                           wp.y + 5.5f * scale),
+                    text_col, GetTitle().data(),
+                    GetTitle().data() + GetTitle().size());
+                dl->AddText(font, desc_px,
+                    ImVec2(wp.x + 59.0f * scale,
+                           wp.y + 31.0f * scale),
+                    text_col, GetDescription().data(),
+                    GetDescription().data() + GetDescription().size());
+              }
+            }
+            ImGui::End();
+
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(3);
+          }
+
+          void XNotifyWindow::OnDraw(ImGuiIO& io) {
+          '@
+
+          $modified = [regex]::Replace($content, $pattern, $replacement, 1)
+          if ($modified -eq $content) {
+            throw "Achievement popup source was not modified."
+          }
+          [IO.File]::WriteAllText((Resolve-Path $path), $modified,
+                                  [Text.UTF8Encoding]::new($false))
+
+          $marker = Select-String -Path $path -Pattern 'XBOX360_ORIGINAL_ACHIEVEMENT_V4'
+          if ($marker.Count -ne 1) {
+            throw "V4 marker was not inserted exactly once."
+          }
+
+          Write-Host "Xbox 360 dashboard-derived achievement popup V4 inserted."
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-${{ hashFiles('**/vulkan-sdk.exe') }}
+          restore-keys: ${{ runner.os }}-vulkan-sdk-
+
+      - name: Install Vulkan SDK with SPIR-V tools
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\VulkanSDK") {
+            Write-Host "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+          }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$(Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name)"
+          $env:PATH += ";${env:VULKAN_SDK}\Bin"
+          "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "${env:VULKAN_SDK}\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Download required submodules
+        shell: pwsh
+        run: |
+          $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
+
+      - name: Build Xenia Release
+        shell: pwsh
+        run: python xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Verify executable and package
+        shell: pwsh
+        run: |
+          $exe = "build\bin\Windows\Release\xenia_canary.exe"
+          if (!(Test-Path $exe)) {
+            throw "xenia_canary.exe was not produced."
+          }
+          if ((Get-Item $exe).Length -le 100000) {
+            throw "xenia_canary.exe is unexpectedly small."
+          }
+
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item $exe "artifact\xenia_canary.exe"
+          Copy-Item "src\xenia\ui\imgui_guest_notification.cc" "artifact\imgui_guest_notification.v4.cc"
+
+          $hash = (Get-FileHash "artifact\xenia_canary.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenia_canary.exe" | Set-Content "artifact\SHA256.txt" -Encoding ascii
+
+          @"
+          Xenia Canary Xbox 360 Achievement Popup V4
+          Upstream commit: $env:XENIA_COMMIT
+          Patch marker: XBOX360_ORIGINAL_ACHIEVEMENT_V4
+
+          Put these files beside Xenia under:
+            xbox360_ui\xenonLogo.png
+            xbox360_ui\Achievement.png
+
+          V4 geometry derived from dashboard 2.0.17559.0 skin.xur:
+            scr_Notification: 370 x 61
+            bgCurve1: 356 x 39, Y=10
+            xenonLogo1: 58 x 58, X=3.76876, Y=0.204125
+            TextPresenter: 283 x 60, X=59, PointSize=11
+
+          SHA-256: $hash
+          "@ | Set-Content "artifact\README_V4.txt" -Encoding ascii
+
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-achievement-popup-v4-a5a18f5c7
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
