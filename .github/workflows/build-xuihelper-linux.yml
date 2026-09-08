@@ -26,6 +26,20 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Patch extension path for Linux
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('XUIHelper/XUIHelper.CLI/Program.cs')
+          s = p.read_text(encoding='utf-8-sig')
+          old = 'string extensionsDirPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, @"Assets\\Extensions");'
+          new = 'string extensionsDirPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", "Extensions");'
+          if old not in s:
+              raise SystemExit('Program.cs extension path anchor not found')
+          p.write_text(s.replace(old, new), encoding='utf-8')
+          PY
+
       - name: Publish self-contained Linux x64 CLI
         shell: bash
         run: |
@@ -37,15 +51,15 @@ jobs:
       - name: Copy dashboard 17559 extension schemas
         shell: bash
         run: |
-          mkdir -p publish/Extensions/17559
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/XuiElements.xml publish/Extensions/17559/
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/XuiDataBinding.xml publish/Extensions/17559/
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/XamElements.xml publish/Extensions/17559/
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559CustomElements.xml publish/Extensions/17559/
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559SceneElements.xml publish/Extensions/17559/
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559ControlPackElements.xml publish/Extensions/17559/
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559HUDElements.xml publish/Extensions/17559/
-          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559.xhe publish/Extensions/17559/
+          mkdir -p publish/Assets/Extensions/17559
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/XuiElements.xml publish/Assets/Extensions/17559/
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/XuiDataBinding.xml publish/Assets/Extensions/17559/
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/XamElements.xml publish/Assets/Extensions/17559/
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559CustomElements.xml publish/Assets/Extensions/17559/
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559SceneElements.xml publish/Assets/Extensions/17559/
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559ControlPackElements.xml publish/Assets/Extensions/17559/
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559HUDElements.xml publish/Assets/Extensions/17559/
+          cp XUIHelper/XUIHelper.Core/Assets/Extensions/V8/17559.xhe publish/Assets/Extensions/17559/
           chmod +x publish/XUIHelper.CLI
 
       - name: Smoke test
