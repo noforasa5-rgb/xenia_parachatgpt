@@ -1,0 +1,449 @@
+name: Build Xenia Canary Xbox 360 Achievement Popup V2
+
+on:
+  push:
+    branches: [achievement-popup-v2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release Windows x86-64 - Xbox 360 Achievement Popup V2
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+      XENIA_COMMIT: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+
+    steps:
+      - name: Checkout exact Xenia Canary revision
+        uses: actions/checkout@v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify exact revision
+        shell: pwsh
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:XENIA_COMMIT) {
+            throw "Wrong Xenia revision: $actual"
+          }
+          Write-Host "Building Xenia Canary commit $actual"
+
+      - name: Apply Xbox 360 original-style achievement popup V2
+        shell: pwsh
+        run: |
+          $path = "src/xenia/ui/imgui_guest_notification.cc"
+          $content = Get-Content $path -Raw
+
+          $pattern = '(?ms)^void AchievementNotificationWindow::OnDraw\(ImGuiIO& io\) \{.*?^void XNotifyWindow::OnDraw\(ImGuiIO& io\) \{'
+          $found = [regex]::Matches($content, $pattern)
+          if ($found.Count -ne 1) {
+            throw "Expected exactly one AchievementNotificationWindow::OnDraw block, found $($found.Count)."
+          }
+
+          $replacement = @'
+          void AchievementNotificationWindow::OnDraw(ImGuiIO& io) {
+            // XBOX360_ORIGINAL_ACHIEVEMENT_V2
+            // Recreated from an original Xbox 360 reference recording:
+            // fast left-to-right capsule opening, opaque graphite shell,
+            // segmented status ring and alternating Xbox/trophy centre symbol.
+            const uint64_t now = Clock::QueryHostUptimeMillis();
+            if (GetCreationTime() == 0) {
+              SetCreationTime(now);
+          #if XE_PLATFORM_WIN32
+              if (!cvars::notification_sound_path.empty()) {
+                auto notification_sound_path = cvars::notification_sound_path;
+                if (std::filesystem::exists(notification_sound_path)) {
+                  PlaySound(std::wstring(notification_sound_path.begin(),
+                                         notification_sound_path.end())
+                                .c_str(),
+                            NULL,
+                            SND_FILENAME | SND_NODEFAULT | SND_NOSTOP | SND_ASYNC);
+                }
+              }
+          #endif
+            }
+
+            const float elapsed =
+                static_cast<float>(now - GetCreationTime()) / 1000.0f;
+
+            // Reference video: ~0.2 s opening, ~5.5 s readable hold,
+            // ~0.3 s closing. Total presentation is about six seconds.
+            constexpr float kExpandStart = 0.02f;
+            constexpr float kExpandEnd = 0.24f;
+            constexpr float kHoldEnd = 5.70f;
+            constexpr float kCollapseEnd = 5.98f;
+            constexpr float kEndTime = 6.12f;
+
+            if (elapsed >= kEndTime) {
+              delete this;
+              return;
+            }
+
+            const auto clamp01 = [](float v) {
+              return std::fmaxf(0.0f, std::fminf(1.0f, v));
+            };
+            const auto smooth_step = [&clamp01](float v) {
+              const float t = clamp01(v);
+              return t * t * (3.0f - 2.0f * t);
+            };
+            const auto ease_out_cubic = [&clamp01](float v) {
+              const float t = clamp01(v);
+              const float q = 1.0f - t;
+              return 1.0f - q * q * q;
+            };
+
+            float open_amount = 0.0f;
+            if (elapsed < kExpandStart) {
+              open_amount = 0.0f;
+            } else if (elapsed < kExpandEnd) {
+              open_amount = ease_out_cubic(
+                  (elapsed - kExpandStart) / (kExpandEnd - kExpandStart));
+            } else if (elapsed < kHoldEnd) {
+              open_amount = 1.0f;
+            } else if (elapsed < kCollapseEnd) {
+              open_amount = 1.0f - smooth_step(
+                  (elapsed - kHoldEnd) / (kCollapseEnd - kHoldEnd));
+            } else {
+              open_amount = 0.0f;
+            }
+
+            float master_alpha = 1.0f;
+            if (elapsed < 0.08f) {
+              master_alpha = smooth_step(elapsed / 0.08f);
+            } else if (elapsed > kCollapseEnd) {
+              master_alpha = 1.0f - smooth_step(
+                  (elapsed - kCollapseEnd) / (kEndTime - kCollapseEnd));
+            }
+
+            float text_alpha = smooth_step((elapsed - 0.16f) / 0.14f);
+            if (elapsed > 5.60f) {
+              text_alpha *= 1.0f - smooth_step((elapsed - 5.60f) / 0.18f);
+            }
+            text_alpha = clamp01(text_alpha) * master_alpha;
+
+            const ImVec2 screen_size = io.DisplaySize;
+            const float window_scale =
+                std::fminf(screen_size.x / default_drawing_resolution.x,
+                           screen_size.y / default_drawing_resolution.y);
+            if (window_scale <= 0.0f || io.Fonts->Fonts.empty()) {
+              return;
+            }
+
+            ImFont* font = io.Fonts->Fonts[0];
+            const float title_font_px = 18.5f * window_scale;
+            const float description_font_px = 17.0f * window_scale;
+            const ImVec2 title_size = font->CalcTextSizeA(
+                title_font_px, FLT_MAX, -1.0f, GetTitle().data());
+            const ImVec2 description_size = font->CalcTextSizeA(
+                description_font_px, FLT_MAX, -1.0f, GetDescription().data());
+
+            // Geometry is based on the 1280x720 Xbox 360 UI coordinate space.
+            const float capsule_height = 66.0f * window_scale;
+            const float icon_diameter = 60.0f * window_scale;
+            const float text_start_x = 73.0f * window_scale;
+            const float requested_width =
+                text_start_x + std::fmaxf(title_size.x, description_size.x) +
+                22.0f * window_scale;
+            float final_width =
+                std::fmaxf(405.0f * window_scale, requested_width);
+            final_width = std::fminf(final_width, screen_size.x * 0.88f);
+            final_width = std::fmaxf(final_width, capsule_height + 2.0f);
+
+            float current_width = capsule_height +
+                                  (final_width - capsule_height) * open_amount;
+            current_width = std::fmaxf(capsule_height, current_width);
+
+            // Keep the left edge fixed while opening so the capsule grows to
+            // the right, matching the original recording rather than scaling
+            // around its centre.
+            const ImVec2 final_notification_size(
+                std::floor(final_width), std::floor(capsule_height));
+            const ImVec2 final_position = CalculateNotificationScreenPosition(
+                screen_size, final_notification_size, GetPositionId());
+            if (std::isnan(final_position.x) || std::isnan(final_position.y)) {
+              return;
+            }
+
+            const ImVec2 current_notification_size(
+                std::floor(current_width), std::floor(capsule_height));
+            ImGui::SetNextWindowSize(current_notification_size);
+            ImGui::SetNextWindowPos(final_position);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg,
+                                  ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+
+            ImGui::Begin("Achievement Notification Window", nullptr,
+                         NOTIFY_TOAST_FLAGS);
+            {
+              ImDrawList* dl = ImGui::GetWindowDrawList();
+              const ImVec2 wp = ImGui::GetWindowPos();
+              const float h = capsule_height;
+              const float r = h * 0.50f;
+              const float a = master_alpha;
+              const auto col = [a](float rr, float gg, float bb, float aa) {
+                return ImGui::GetColorU32(ImVec4(rr, gg, bb, aa * a));
+              };
+
+              const ImVec2 p0 = wp;
+              const ImVec2 p1(wp.x + current_width, wp.y + h);
+
+              // Soft outer shadow / halo visible in the original shell.
+              dl->AddRectFilled(ImVec2(p0.x - 3.0f * window_scale,
+                                       p0.y - 3.0f * window_scale),
+                                ImVec2(p1.x + 3.0f * window_scale,
+                                       p1.y + 3.0f * window_scale),
+                                col(0.02f, 0.02f, 0.02f, 0.42f),
+                                r + 3.0f * window_scale);
+
+              // Dark outer rim, silver rim and graphite centre.
+              dl->AddRectFilled(p0, p1, col(0.12f, 0.12f, 0.12f, 1.0f), r);
+              const float rim = 2.0f * window_scale;
+              dl->AddRectFilled(ImVec2(p0.x + rim, p0.y + rim),
+                                ImVec2(p1.x - rim, p1.y - rim),
+                                col(0.48f, 0.48f, 0.48f, 1.0f),
+                                r - rim);
+              const float inner = 4.0f * window_scale;
+              dl->AddRectFilled(ImVec2(p0.x + inner, p0.y + inner),
+                                ImVec2(p1.x - inner, p1.y - inner),
+                                col(0.285f, 0.285f, 0.285f, 1.0f),
+                                r - inner);
+
+              // Thin top highlight and lower shade reproduce the metallic edge.
+              dl->AddLine(ImVec2(p0.x + r, p0.y + 3.0f * window_scale),
+                          ImVec2(p1.x - r, p0.y + 3.0f * window_scale),
+                          col(0.72f, 0.72f, 0.72f, 0.72f),
+                          1.2f * window_scale);
+              dl->AddLine(ImVec2(p0.x + r, p1.y - 3.0f * window_scale),
+                          ImVec2(p1.x - r, p1.y - 3.0f * window_scale),
+                          col(0.08f, 0.08f, 0.08f, 0.82f),
+                          1.5f * window_scale);
+
+              // Xbox 360 status disc.
+              const ImVec2 c(wp.x + h * 0.50f, wp.y + h * 0.50f);
+              const float disc_r = icon_diameter * 0.50f;
+              dl->AddCircleFilled(c, disc_r,
+                                  col(0.055f, 0.055f, 0.055f, 1.0f), 48);
+              dl->AddCircle(c, disc_r,
+                            col(0.62f, 0.62f, 0.62f, 0.95f), 48,
+                            1.5f * window_scale);
+
+              // Four segmented ring quadrants. Top-left is Xbox green.
+              constexpr float kPi = 3.14159265358979323846f;
+              const float ring_r = disc_r - 6.0f * window_scale;
+              const float ring_thickness = 6.5f * window_scale;
+              const float gap = 0.10f;
+              const auto arc = [&](float a0, float a1, ImU32 color) {
+                dl->PathArcTo(c, ring_r, a0 + gap, a1 - gap, 16);
+                dl->PathStroke(color, false, ring_thickness);
+              };
+              const float ring_alpha =
+                  smooth_step((elapsed - 0.08f) / 0.16f) * a;
+              const ImU32 green = ImGui::GetColorU32(
+                  ImVec4(0.45f, 0.93f, 0.05f, ring_alpha));
+              const ImU32 silver = ImGui::GetColorU32(
+                  ImVec4(0.50f, 0.50f, 0.50f, 0.94f * ring_alpha));
+              arc(kPi, 1.5f * kPi, green);
+              arc(1.5f * kPi, 2.0f * kPi, silver);
+              arc(0.0f, 0.5f * kPi, silver);
+              arc(0.5f * kPi, kPi, silver);
+
+              // Centre alternates approximately once per second between the
+              // Xbox orb and trophy, as in the original 360 animation.
+              const float symbol_time = std::fmaxf(0.0f, elapsed - 0.28f);
+              const float phase = std::fmodf(symbol_time, 2.0f);
+              float xbox_alpha = 0.0f;
+              float trophy_alpha = 0.0f;
+              if (phase < 0.82f) {
+                xbox_alpha = 1.0f;
+              } else if (phase < 1.02f) {
+                const float t = smooth_step((phase - 0.82f) / 0.20f);
+                xbox_alpha = 1.0f - t;
+                trophy_alpha = t;
+              } else if (phase < 1.82f) {
+                trophy_alpha = 1.0f;
+              } else {
+                const float t = smooth_step((phase - 1.82f) / 0.18f);
+                trophy_alpha = 1.0f - t;
+                xbox_alpha = t;
+              }
+              xbox_alpha *= a;
+              trophy_alpha *= a;
+
+              const float core_r = ring_r - 6.0f * window_scale;
+              if (xbox_alpha > 0.001f) {
+                dl->AddCircleFilled(c, core_r,
+                    ImGui::GetColorU32(ImVec4(0.74f, 0.76f, 0.73f,
+                                              xbox_alpha)), 40);
+                dl->AddCircleFilled(ImVec2(c.x, c.y - 2.0f * window_scale),
+                                    core_r * 0.78f,
+                    ImGui::GetColorU32(ImVec4(0.90f, 0.91f, 0.88f,
+                                              0.78f * xbox_alpha)), 36);
+                const ImU32 xgreen = ImGui::GetColorU32(
+                    ImVec4(0.24f, 0.72f, 0.04f, xbox_alpha));
+                const float d = core_r * 0.56f;
+                dl->AddLine(ImVec2(c.x - d, c.y - d),
+                            ImVec2(c.x + d, c.y + d), xgreen,
+                            5.0f * window_scale);
+                dl->AddLine(ImVec2(c.x + d, c.y - d),
+                            ImVec2(c.x - d, c.y + d), xgreen,
+                            5.0f * window_scale);
+              }
+
+              if (trophy_alpha > 0.001f) {
+                const ImU32 white = ImGui::GetColorU32(
+                    ImVec4(0.96f, 0.96f, 0.96f, trophy_alpha));
+                const float tw = 16.0f * window_scale;
+                const float th = 18.0f * window_scale;
+                const ImVec2 cup0(c.x - tw * 0.50f,
+                                   c.y - th * 0.58f);
+                const ImVec2 cup1(c.x + tw * 0.50f,
+                                   c.y + th * 0.25f);
+                dl->AddRectFilled(cup0, cup1, white,
+                                  2.0f * window_scale);
+                dl->AddCircle(ImVec2(cup0.x, c.y - 2.0f * window_scale),
+                              5.0f * window_scale, white, 16,
+                              2.5f * window_scale);
+                dl->AddCircle(ImVec2(cup1.x, c.y - 2.0f * window_scale),
+                              5.0f * window_scale, white, 16,
+                              2.5f * window_scale);
+                dl->AddRectFilled(
+                    ImVec2(c.x - 2.0f * window_scale, cup1.y),
+                    ImVec2(c.x + 2.0f * window_scale,
+                           cup1.y + 7.0f * window_scale), white);
+                dl->AddRectFilled(
+                    ImVec2(c.x - 9.0f * window_scale,
+                           cup1.y + 6.0f * window_scale),
+                    ImVec2(c.x + 9.0f * window_scale,
+                           cup1.y + 10.0f * window_scale), white,
+                    1.5f * window_scale);
+              }
+
+              if (text_alpha > 0.001f && open_amount > 0.70f) {
+                const ImU32 title_col = ImGui::GetColorU32(
+                    ImVec4(0.96f, 0.96f, 0.96f, text_alpha));
+                const ImU32 desc_col = ImGui::GetColorU32(
+                    ImVec4(0.90f, 0.90f, 0.90f, text_alpha));
+                dl->AddText(font, title_font_px,
+                            ImVec2(wp.x + text_start_x,
+                                   wp.y + 10.0f * window_scale),
+                            title_col, GetTitle().data());
+                dl->AddText(font, description_font_px,
+                            ImVec2(wp.x + text_start_x,
+                                   wp.y + 35.0f * window_scale),
+                            desc_col, GetDescription().data());
+              }
+            }
+            ImGui::End();
+
+            ImGui::PopStyleColor(1);
+            ImGui::PopStyleVar(3);
+          }
+
+          void XNotifyWindow::OnDraw(ImGuiIO& io) {
+          '@
+
+          $modified = [regex]::Replace($content, $pattern, $replacement, 1)
+          if ($modified -eq $content) {
+            throw "Achievement popup source was not modified."
+          }
+
+          [System.IO.File]::WriteAllText(
+            (Resolve-Path $path),
+            $modified,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+          $marker = Select-String -Path $path -Pattern 'XBOX360_ORIGINAL_ACHIEVEMENT_V2'
+          if ($marker.Count -ne 1) {
+            throw "V2 marker was not inserted exactly once."
+          }
+
+          $manager = "src/xenia/kernel/xam/achievement_manager.cc"
+          $managerText = Get-Content $manager -Raw
+          if (!$managerText.Contains('"Achievement unlocked"') -or
+              !$managerText.Contains('fmt::format("{}G - {}"')) {
+            throw "AchievementManager text format differs from expected a5a18f5c7 layout."
+          }
+
+          Write-Host "Xbox 360 original-style achievement popup V2 inserted."
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-${{ hashFiles('**/vulkan-sdk.exe') }}
+          restore-keys: ${{ runner.os }}-vulkan-sdk-
+
+      - name: Install Vulkan SDK with SPIR-V tools
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\VulkanSDK") {
+            Write-Host "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+          }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$(Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name)"
+          $env:PATH += ";${env:VULKAN_SDK}\Bin"
+          "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "${env:VULKAN_SDK}\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Download required submodules
+        shell: pwsh
+        run: |
+          $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
+
+      - name: Build Xenia Release
+        shell: pwsh
+        run: python xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Verify executable and calculate SHA-256
+        id: package
+        shell: pwsh
+        run: |
+          $exe = "build\bin\Windows\Release\xenia_canary.exe"
+          if (!(Test-Path $exe)) {
+            throw "xenia_canary.exe was not produced."
+          }
+          if ((Get-Item $exe).Length -le 100000) {
+            throw "xenia_canary.exe is unexpectedly small."
+          }
+
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item $exe "artifact\xenia_canary.exe"
+          Copy-Item "src\xenia\ui\imgui_guest_notification.cc" "artifact\imgui_guest_notification.v2.cc"
+
+          $hash = (Get-FileHash "artifact\xenia_canary.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenia_canary.exe" | Set-Content "artifact\SHA256.txt" -Encoding ascii
+
+          @"
+          Xenia Canary Xbox 360 Achievement Popup V2
+          Upstream commit: $env:XENIA_COMMIT
+          Patch marker: XBOX360_ORIGINAL_ACHIEVEMENT_V2
+          Reference: user-supplied original Xbox 360 achievement video
+          SHA-256: $hash
+          "@ | Set-Content "artifact\BUILD_INFO.txt" -Encoding ascii
+
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-achievement-popup-v2-a5a18f5c7
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
