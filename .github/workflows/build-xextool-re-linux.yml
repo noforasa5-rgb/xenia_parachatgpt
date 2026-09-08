@@ -1,0 +1,61 @@
+name: Build XexTool-RE Linux analysis helper
+
+on:
+  push:
+    branches: [achievement-xui-runtime-poc6]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build XexTool-RE CLI for Linux x86-64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout PoC branch
+        uses: actions/checkout@v6
+        with:
+          path: patchrepo
+          fetch-depth: 1
+
+      - name: Checkout clean-room XexTool-RE
+        uses: actions/checkout@v6
+        with:
+          repository: mrtitanic777/XexTool-RE
+          ref: main
+          path: xextool-re
+          fetch-depth: 1
+
+      - name: Build CLI natively on Linux
+        shell: bash
+        working-directory: xextool-re
+        run: |
+          make clean || true
+          make cli CXX=g++ CXXFLAGS='-std=c++17 -O2 -Wall -Wextra -MMD -MP'
+          file xextool-re.exe
+          chmod +x xextool-re.exe
+          ./xextool-re.exe selftest
+
+      - name: Package helper
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp xextool-re/xextool-re.exe artifact/xextool-re-linux
+          cp xextool-re/LICENSE artifact/LICENSE_XEXTOOL_RE.txt
+          cat > artifact/README.txt <<'EOF'
+          XexTool-RE Linux analysis helper
+          Built from the public clean-room project mrtitanic777/XexTool-RE.
+          This helper is used only to extract/analyse a user-owned Xbox 360 XEX locally.
+          Example: ./xextool-re-linux extract xam.xex xam_base.exe
+          EOF
+          sha256sum artifact/xextool-re-linux > artifact/SHA256.txt
+
+      - name: Upload helper artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xextool-re-linux-x64
+          path: artifact/*
+          if-no-files-found: error
