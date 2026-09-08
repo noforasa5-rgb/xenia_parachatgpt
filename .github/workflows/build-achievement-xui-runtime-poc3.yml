@@ -1,0 +1,154 @@
+name: Build Xenia Canary Xbox 360 XUI Runtime PoC 3
+
+on:
+  push:
+    branches: [achievement-xui-runtime-poc3]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release Windows x86-64 - Xbox 360 XUI Runtime PoC 3
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+      XENIA_COMMIT: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+
+    steps:
+      - name: Checkout PoC 3 patch source
+        uses: actions/checkout@v6
+        with:
+          path: patchrepo
+          fetch-depth: 1
+
+      - name: Checkout exact Xenia Canary revision
+        uses: actions/checkout@v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+          path: xenia
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify exact revision
+        shell: pwsh
+        working-directory: xenia
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:XENIA_COMMIT) { throw "Wrong Xenia revision: $actual" }
+          Write-Host "Building Xenia Canary commit $actual"
+
+      - name: Apply base original-XUR runtime hook
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Apply PoC 3 DATA KEYP KEYD timeline binder
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc3.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Verify PoC 3 marker and initialization hook
+        shell: pwsh
+        run: |
+          $cc = "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\xbox360_xui_runtime.cc"
+          $drawer = "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\imgui_drawer.cc"
+          if (!(Test-Path $cc)) { throw "XUI runtime source missing." }
+          if ((Select-String -Path $cc -Pattern 'XUI-POC3: runtime timeline binding ready').Count -ne 1) {
+            throw "PoC 3 marker missing."
+          }
+          if ((Select-String -Path $drawer -Pattern 'Xbox360XuiRuntime::Get\(\).Initialize').Count -ne 1) {
+            throw "XUI runtime initialization hook missing."
+          }
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-xenia-xui-poc3
+          restore-keys: ${{ runner.os }}-vulkan-sdk-
+
+      - name: Install Vulkan SDK with SPIR-V tools
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\VulkanSDK") {
+            Write-Host "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -NoNewWindow -Wait
+          }
+          $sdkDir = Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name
+          if (!$sdkDir) { throw "Vulkan SDK directory was not found." }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$sdkDir"
+          $env:PATH += ";${env:VULKAN_SDK}\Bin"
+          "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "${env:VULKAN_SDK}\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Download required submodules
+        shell: pwsh
+        working-directory: xenia
+        run: |
+          $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
+
+      - name: Build Xenia Release
+        shell: pwsh
+        working-directory: xenia
+        run: python xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Verify executable and package
+        shell: pwsh
+        run: |
+          $exe = "$env:GITHUB_WORKSPACE\xenia\build\bin\Windows\Release\xenia_canary.exe"
+          if (!(Test-Path $exe)) { throw "xenia_canary.exe was not produced." }
+          if ((Get-Item $exe).Length -le 100000) { throw "xenia_canary.exe is unexpectedly small." }
+
+          $artifact = "$env:GITHUB_WORKSPACE\artifact"
+          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+          Copy-Item $exe "$artifact\xenia_canary.exe"
+          Copy-Item "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\xbox360_xui_runtime.h" "$artifact\xbox360_xui_runtime.h"
+          Copy-Item "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\xbox360_xui_runtime.cc" "$artifact\xbox360_xui_runtime.cc"
+
+          $hash = (Get-FileHash "$artifact\xenia_canary.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenia_canary.exe" | Set-Content "$artifact\SHA256.txt" -Encoding ascii
+
+          @"
+          Xbox 360 XUI Runtime PoC 3
+          Upstream Xenia Canary: $env:XENIA_COMMIT
+
+          This is a diagnostic native-XUR milestone. It does not redraw the popup yet.
+
+          New in PoC 3:
+          - Parse KEYP8 property-index stream from the original skin.xur.
+          - Preserve full KEYD8 records and raw flag bytes.
+          - Probe DATA8 structurally for the real 13-timeline notification block.
+          - Bind each discovered timeline to the original KEYD8 keyframe base/count.
+          - Log first/last frame and unknown-flag count for each notification child timeline.
+          - Validate the scr_Notification ID occurs near the discovered DATA8 timeline block.
+
+          Required next to xenia_canary.exe:
+          xbox360_ui\notify.xur
+          xbox360_ui\skin.xur
+          xbox360_ui\xenonLogo.png
+          xbox360_ui\Achievement.png
+
+          After launching Xenia, send xenia.log. Search for lines beginning XUI-POC3:.
+
+          SHA-256: $hash
+          "@ | Set-Content "$artifact\README_XUI_POC3.txt" -Encoding ascii
+
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-xbox360-xui-runtime-poc3-a5a18f5c7
+          path: artifact/*
+          if-no-files-found: error
