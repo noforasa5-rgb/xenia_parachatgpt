@@ -1,0 +1,24 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+
+const root=path.resolve(process.argv[2]);
+const read=name=>fs.readFileSync(path.join(root,'src/xenia/ui',name),'utf8');
+const drawer=read('imgui_drawer.cc'), guest=read('imgui_guest_notification.cc');
+const runtime=read('xbox360_xui_runtime.cc'), header=read('imgui_guest_notification.h');
+assert.equal((drawer.match(/Xbox360XuiRuntime::Get\(\)\.Initialize\("xbox360_ui"\)/g)??[]).length,1,'Keep the existing startup hook exactly once');
+assert(guest.includes('XUI-POC8: original PNG renderer activated'));
+assert(guest.includes('xui_runtime.root_path() / "xenonLogo.png"'));
+assert(guest.includes('xui_runtime.root_path() / "Achievement.png"'));
+assert(guest.includes('draw->AddImage('));
+assert(!guest.includes('const float logo_radius'));
+assert(!guest.includes('const ImVec2 cup_a'));
+assert(guest.includes('ImGuiStyleVar_WindowBorderSize, 0.0f'));
+assert(guest.includes('ImGui::PopStyleVar(2)'));
+assert(guest.includes('ImGuiWindowFlags_NoSavedSettings'));
+assert(drawer.includes('xbox360_notification_textures_.clear();'));
+assert(drawer.includes('texture = LoadImGuiIcon('));
+assert(runtime.includes('XUI-POC6: runtime timeline evaluator ready={}'));
+assert(runtime.includes('state.anchor = evaluated.value.unsigned_value'));
+for(const member of new Set(guest.match(/xui_poc7_[a-z_]+_/g))) assert(header.includes(member),`Missing member ${member}`);
+console.log('PoC 8 source integration checks passed (runtime execution and visual validation are separate).');
