@@ -1,0 +1,203 @@
+name: Build Xenia Canary Xbox 360 XUI Runtime PoC 10
+
+on:
+  push:
+    branches: [achievement-xui-runtime-poc10]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Release Windows x86-64 - Xbox 360 XUI Runtime PoC 10
+    runs-on: windows-2025
+    timeout-minutes: 90
+
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: 1
+      XENIA_COMMIT: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+
+    steps:
+      - name: Checkout PoC 10 patch source
+        uses: actions/checkout@v6
+        with:
+          path: patchrepo
+          fetch-depth: 1
+
+      - name: Checkout exact Xenia Canary revision
+        uses: actions/checkout@v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: a5a18f5c752d08f8b0d84139b69b16fb370b8cbb
+          path: xenia
+          fetch-depth: 0
+          submodules: false
+
+      - name: Verify exact revision
+        shell: pwsh
+        working-directory: xenia
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:XENIA_COMMIT) { throw "Wrong Xenia revision: $actual" }
+          Write-Host "Building Xenia Canary commit $actual"
+
+      - name: Apply original-XUR runtime startup hook
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Apply PoC 3 DATA timeline binder foundation
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc3.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Apply PoC 4 original-XUR property value binder
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc4.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Apply PoC 5 playhead and property evaluator
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc5.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Apply PoC 6 XAM-derived Ease evaluator
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc6.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Apply PoC 7 visible XUI alpha renderer
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\patchrepo\tools\apply-achievement-xui-runtime-poc7.ps1" `
+            -XeniaPath "$env:GITHUB_WORKSPACE\xenia"
+
+      - name: Verify PoC 7 renderer markers
+        shell: pwsh
+        run: |
+          $runtime = "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\xbox360_xui_runtime.cc"
+          $guest = "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\imgui_guest_notification.cc"
+          $header = "$env:GITHUB_WORKSPACE\xenia\src\xenia\ui\xbox360_xui_runtime.h"
+          if ((Select-String -Path $runtime -SimpleMatch 'XUI-POC7: snapshot evaluator ready').Count -ne 1) {
+            throw "PoC 7 snapshot evaluator marker missing."
+          }
+          if ((Select-String -Path $runtime -SimpleMatch 'EvaluateNotificationSnapshot').Count -lt 1) {
+            throw "PoC 7 runtime snapshot method missing."
+          }
+          if ((Select-String -Path $guest -SimpleMatch 'XUI-POC7: visible XUI alpha renderer activated').Count -ne 1) {
+            throw "PoC 7 visible renderer marker missing."
+          }
+          if ((Select-String -Path $guest -SimpleMatch 'EvaluateNotificationSnapshot').Count -lt 1) {
+            throw "PoC 7 notification renderer is not connected to the XUR evaluator."
+          }
+          if ((Select-String -Path $header -SimpleMatch 'Xbox360XuiNotificationSnapshot').Count -lt 1) {
+            throw "PoC 7 public snapshot type missing."
+          }
+
+      - name: Apply PoC 8 original PNG renderer and placement fixes
+        shell: pwsh
+        run: |
+          node --check "$env:GITHUB_WORKSPACE/patchrepo/tools/apply-achievement-xui-runtime-poc8.mjs"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 8 patch syntax check failed." }
+          node "$env:GITHUB_WORKSPACE/patchrepo/tools/apply-achievement-xui-runtime-poc8.mjs" "$env:GITHUB_WORKSPACE/xenia"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 8 patch application failed." }
+          node "$env:GITHUB_WORKSPACE/patchrepo/tools/verify-achievement-xui-runtime-poc8.mjs" "$env:GITHUB_WORKSPACE/xenia"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 8 source integration check failed." }
+
+      - name: Apply PoC 9 original gradients and SizeMode 16 layout
+        shell: pwsh
+        run: |
+          node --check "$env:GITHUB_WORKSPACE/patchrepo/tools/apply-achievement-xui-runtime-poc9.mjs"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 9 patch syntax check failed." }
+          node "$env:GITHUB_WORKSPACE/patchrepo/tools/apply-achievement-xui-runtime-poc9.mjs" "$env:GITHUB_WORKSPACE/xenia"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 9 patch application failed." }
+          node --check "$env:GITHUB_WORKSPACE/patchrepo/tools/verify-achievement-xui-runtime-poc9.mjs"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 9 verifier syntax check failed." }
+          node "$env:GITHUB_WORKSPACE/patchrepo/tools/verify-achievement-xui-runtime-poc9.mjs" "$env:GITHUB_WORKSPACE/xenia"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 9 source integration check failed." }
+
+      - name: Apply PoC 10 original achievement sound
+        shell: pwsh
+        run: |
+          node --check "$env:GITHUB_WORKSPACE/patchrepo/tools/apply-achievement-xui-runtime-poc10.mjs"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 10 patch syntax check failed." }
+          node "$env:GITHUB_WORKSPACE/patchrepo/tools/apply-achievement-xui-runtime-poc10.mjs" "$env:GITHUB_WORKSPACE/xenia"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 10 patch application failed." }
+          node --check "$env:GITHUB_WORKSPACE/patchrepo/tools/verify-achievement-xui-runtime-poc10.mjs"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 10 verifier syntax check failed." }
+          node "$env:GITHUB_WORKSPACE/patchrepo/tools/verify-achievement-xui-runtime-poc10.mjs" "$env:GITHUB_WORKSPACE/xenia"
+          if ($LASTEXITCODE -ne 0) { throw "PoC 10 source integration check failed." }
+
+      - name: Cache Vulkan SDK
+        id: cache-vulkan-sdk
+        uses: actions/cache@v6
+        with:
+          path: C:\VulkanSDK
+          key: ${{ runner.os }}-vulkan-sdk-xenia-xui-poc10
+          restore-keys: ${{ runner.os }}-vulkan-sdk-
+
+      - name: Install Vulkan SDK with SPIR-V tools
+        shell: pwsh
+        run: |
+          if (Test-Path "C:\VulkanSDK") {
+            Write-Host "Vulkan SDK found in cache."
+          } else {
+            Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile "vulkan-sdk.exe"
+            Start-Process -FilePath "vulkan-sdk.exe" -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -WindowStyle Hidden -Wait
+          }
+          $sdkDir = Get-ChildItem -Path 'C:\VulkanSDK' -Directory | Select-Object -First 1 -ExpandProperty Name
+          if (!$sdkDir) { throw "Vulkan SDK directory was not found." }
+          $env:VULKAN_SDK = "C:\VulkanSDK\$sdkDir"
+          $env:PATH += ";${env:VULKAN_SDK}\Bin"
+          "VULKAN_SDK=$env:VULKAN_SDK" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "${env:VULKAN_SDK}\Bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Download required submodules
+        shell: pwsh
+        working-directory: xenia
+        run: |
+          $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
+          git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
+
+      - name: Build Xenia Release
+        shell: pwsh
+        working-directory: xenia
+        run: python xenia-build.py build --config=Release --target=xenia-app
+
+      - name: Verify executable and package
+        shell: pwsh
+        run: |
+          $exe = "$env:GITHUB_WORKSPACE/xenia/build/bin/Windows/Release/xenia_canary.exe"
+          if (!(Test-Path -LiteralPath $exe)) { throw "xenia_canary.exe was not produced." }
+          if ((Get-Item -LiteralPath $exe).Length -le 100000) { throw "Executable unexpectedly small." }
+          $artifact = "$env:GITHUB_WORKSPACE/artifact"
+          $source = "$artifact/source/src/xenia/ui"
+          New-Item -ItemType Directory -Force -Path $source | Out-Null
+          Copy-Item -LiteralPath $exe -Destination "$artifact/xenia_canary.exe"
+          foreach ($name in @('xbox360_xui_runtime.h', 'xbox360_xui_runtime.cc', 'imgui_guest_notification.h', 'imgui_guest_notification.cc', 'imgui_drawer.h', 'imgui_drawer.cc')) {
+            Copy-Item -LiteralPath "$env:GITHUB_WORKSPACE/xenia/src/xenia/ui/$name" -Destination $source
+          }
+          Copy-Item -LiteralPath "$env:GITHUB_WORKSPACE/patchrepo/docs/xui_runtime_poc10.md" -Destination "$artifact/README_XUI_POC10.md"
+          $hash = (Get-FileHash -LiteralPath "$artifact/xenia_canary.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  xenia_canary.exe" | Set-Content -LiteralPath "$artifact/SHA256.txt" -Encoding ascii
+          @{
+            xenia_commit = $env:XENIA_COMMIT
+            patch_commit = $env:GITHUB_SHA
+            workflow_run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            executable_sha256 = $hash
+            visual_validation = 'Pending user video/log; PoC 10 original NotifyPopup.xma playback'
+          } | ConvertTo-Json | Set-Content -LiteralPath "$artifact/BUILD_INFO.json" -Encoding utf8
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-xbox360-xui-runtime-poc10-original-xma-sound-a5a18f5c7
+          path: artifact/**
+          if-no-files-found: error
